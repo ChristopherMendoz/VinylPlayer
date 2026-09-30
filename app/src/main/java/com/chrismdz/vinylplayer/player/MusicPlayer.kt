@@ -20,6 +20,9 @@ class MusicPlayer(
     ).buildAsync()
     private var controller: MediaController? = null
     private var pendingFile: MusicFile? = null
+    private var pendingQueue: List<MusicFile> = emptyList()
+    private var pendingShuffleEnabled = false
+    private var pendingPlayWhenReady = false
     private var released = false
 
     private val listener = object : Player.Listener {
@@ -34,33 +37,44 @@ class MusicPlayer(
             runCatching { controllerFuture.get() }.onSuccess { mediaController ->
                 controller = mediaController
                 mediaController.addListener(listener)
-                pendingFile?.let { load(it) }
+                pendingFile?.let { load(it, pendingQueue, pendingPlayWhenReady, pendingShuffleEnabled) }
                 onStateChanged(mediaController)
             }
         }, ContextCompat.getMainExecutor(context))
     }
 
-    fun load(file: MusicFile) {
-        pendingFile = file
-        controller?.let { player ->
-            val metadata = MediaMetadata.Builder()
-                .setTitle(file.title)
-                .setArtist(file.artist)
-                .setAlbumTitle(file.album)
-                .apply {
-                    file.artworkData?.let {
-                        setArtworkData(it, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
-                    }
-                }
-                .build()
-            val mediaItem = MediaItem.Builder()
-                .setMediaId(file.uri.toString())
-                .setUri(file.uri)
-                .setMediaMetadata(metadata)
-                .build()
+    fun load(file: MusicFile, playWhenReady: Boolean = false) {
+        load(file, listOf(file), playWhenReady, false)
+    }
 
-            player.setMediaItem(mediaItem)
+    fun load(file: MusicFile, queue: List<MusicFile>, playWhenReady: Boolean = false, shuffleEnabled: Boolean = false) {
+        pendingFile = file
+        pendingQueue = queue.ifEmpty { listOf(file) }
+        pendingPlayWhenReady = playWhenReady
+        pendingShuffleEnabled = shuffleEnabled
+        controller?.let { player ->
+            val mediaItems = pendingQueue.distinctBy { it.uri }.map { item ->
+                val metadata = MediaMetadata.Builder()
+                    .setTitle(item.title)
+                    .setArtist(item.artist)
+                    .setAlbumTitle(item.album)
+                    .apply {
+                        item.artworkData?.let {
+                            setArtworkData(it, MediaMetadata.PICTURE_TYPE_FRONT_COVER)
+                        }
+                    }
+                    .build()
+                MediaItem.Builder()
+                    .setMediaId(item.uri.toString())
+                    .setUri(item.uri)
+                    .setMediaMetadata(metadata)
+                    .build()
+            }
+            val selectedIndex = mediaItems.indexOfFirst { it.mediaId == file.uri.toString() }.coerceAtLeast(0)
+            player.setMediaItems(mediaItems, selectedIndex, 0L)
+            player.shuffleModeEnabled = shuffleEnabled
             player.prepare()
+            if (playWhenReady) player.play() else player.pause()
             onStateChanged(player)
         }
     }
@@ -76,8 +90,20 @@ class MusicPlayer(
         }
     }
 
+    fun pause() {
+        controller?.pause()
+    }
+
     fun seekTo(positionMs: Long) {
         controller?.seekTo(positionMs)
+    }
+
+    fun setSpeed(speed: Float) {
+        controller?.setPlaybackSpeed(speed)
+    }
+
+    fun setShuffleEnabled(enabled: Boolean) {
+        controller?.shuffleModeEnabled = enabled
     }
 
     fun currentPosition(): Long = controller?.currentPosition ?: 0L

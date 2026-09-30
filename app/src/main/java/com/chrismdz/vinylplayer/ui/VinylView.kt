@@ -28,6 +28,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.drawscope.withTransform
 import androidx.compose.ui.graphics.graphicsLayer
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.isActive
@@ -78,11 +79,12 @@ fun VinylView(
             contentAlignment = Alignment.Center
         ) {
             if (artwork != null) {
-                Image(
-                    bitmap = artwork.asImageBitmap(),
-                    contentDescription = "Carátula del disco",
-                    modifier = Modifier.fillMaxSize(),
-                    alpha = 0.96f
+                    Image(
+                        bitmap = artwork.asImageBitmap(),
+                        contentDescription = "Carátula del disco",
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Fit,
+                        alpha = 0.96f
                 )
             }
 
@@ -102,7 +104,8 @@ fun VinylView(
                     Image(
                         bitmap = artwork.asImageBitmap(),
                         contentDescription = null,
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier.fillMaxSize(),
+                        contentScale = ContentScale.Fit
                     )
                 }
                 Box(

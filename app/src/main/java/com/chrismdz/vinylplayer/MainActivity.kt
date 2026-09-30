@@ -17,14 +17,22 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            requestPermissions(arrayOf(Manifest.permission.POST_NOTIFICATIONS), 100)
+        val permissions = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            arrayOf(Manifest.permission.POST_NOTIFICATIONS, Manifest.permission.READ_MEDIA_AUDIO)
+        } else {
+            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE)
         }
+        requestPermissions(permissions, 100)
         setContent {
             VinylPlayerTheme {
                 MainScreen(viewModel = playerViewModel)
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        playerViewModel.loadLibrary()
     }
 
     override fun onDestroy() {
