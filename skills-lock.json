@@ -1,0 +1,41 @@
+{
+  "version": 1,
+  "skills": {
+    "android-clean-architecture": {
+      "source": "affaan-m/ecc",
+      "sourceType": "github",
+      "skillPath": "skills/android-clean-architecture/SKILL.md",
+      "computedHash": "80779b595f194a1ca3d59e36cbf4b29f426faaf90cf9c41dfd61a80442214890"
+    },
+    "android-kotlin": {
+      "source": "alinaqi/maggy",
+      "sourceType": "github",
+      "skillPath": "skills/android-kotlin/SKILL.md",
+      "computedHash": "0bb451490ccb9e02daed97d9cd2e84071a874ba46ed5ecf5a491c2fa27f0828f"
+    },
+    "design-mobile-apps": {
+      "source": "designed-by-ai/skills",
+      "sourceType": "github",
+      "skillPath": "skills/design-mobile-apps/SKILL.md",
+      "computedHash": "6d6ed68c53ac9f5564aea489ededb387b8cdf29ffa6f78f2a1fa449f86f19e16"
+    },
+    "frontend-design": {
+      "source": "anthropics/skills",
+      "sourceType": "github",
+      "skillPath": "skills/frontend-design/SKILL.md",
+      "computedHash": "89496d5dd00f4810205f351759594fc2742bf8eea85a2f2b2d1de59f4bd91576"
+    },
+    "kotlin-springboot": {
+      "source": "github/awesome-copilot",
+      "sourceType": "github",
+      "skillPath": "skills/kotlin-springboot/SKILL.md",
+      "computedHash": "beaa34d307bfcce5dd026e3b03c357f98f471b0de1b9fc6a0b7a64d132b74e95"
+    },
+    "mobile-android-design": {
+      "source": "wshobson/agents",
+      "sourceType": "github",
+      "skillPath": "plugins/ui-design/skills/mobile-android-design/SKILL.md",
+      "computedHash": "bcb274bcc4e0ad076b5947f90e5a247f370ed4da1274b2b7347dc293ee396309"
+    }
+  }
+}

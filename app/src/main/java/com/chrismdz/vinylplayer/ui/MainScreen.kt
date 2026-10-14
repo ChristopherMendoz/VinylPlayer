@@ -16,13 +16,16 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.systemBarsPadding
@@ -59,6 +62,7 @@ import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material.icons.filled.Repeat
 import androidx.compose.material.icons.filled.RepeatOne
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Shuffle
@@ -66,6 +70,8 @@ import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -82,11 +88,14 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.key
 import androidx.compose.runtime.setValue
+import androidx.compose.runtime.snapshotFlow
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.graphics.Brush
@@ -101,10 +110,14 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.delay
+import kotlin.math.abs
 import kotlin.math.roundToInt
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.chrismdz.vinylplayer.data.Lyrics
 import com.chrismdz.vinylplayer.data.LyricsStatus
+import com.chrismdz.vinylplayer.data.QueueEntry
 import com.chrismdz.vinylplayer.data.parseSyncedLyrics
 import com.chrismdz.vinylplayer.data.Playlist
 import com.chrismdz.vinylplayer.data.MusicFile
@@ -189,14 +202,21 @@ fun MainScreen(viewModel: PlayerViewModel) {
             Image(
                 bitmap = artwork.asImageBitmap(),
                 contentDescription = null,
-                modifier = Modifier.fillMaxSize().alpha(0.72f),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .then(if (playerTab == PlayerTab.LYRICS) Modifier.blur(32.dp) else Modifier)
+                    .alpha(if (playerTab == PlayerTab.LYRICS) 0.9f else 0.72f),
                 contentScale = ContentScale.Crop
             )
         }
         Box(
             modifier = Modifier.fillMaxSize().background(
                 Brush.verticalGradient(
-                    listOf(Color(0x66101010), Color(0xA6000000), Color(0xF0000000))
+                    if (currentView == MainView.PLAYER && playerTab == PlayerTab.LYRICS) {
+                        listOf(Color(0x66B91E3A), Color(0xAA260E18), Color(0xF00A090A))
+                    } else {
+                        listOf(Color(0x66101010), Color(0xA6000000), Color(0xF0000000))
+                    }
                 )
             )
         )
@@ -298,15 +318,26 @@ fun MainScreen(viewModel: PlayerViewModel) {
     if (showQueue) {
         QueueDialog(
             queue = state.queue,
-            currentUri = state.musicFile?.uri,
-            onSelect = {
-                viewModel.playFromQueue(it)
+            currentEntryId = state.currentQueueEntryId,
+            onSelect = { entry ->
+                viewModel.playFromQueue(entry)
                 currentView = MainView.PLAYER
                 showQueue = false
             },
             repeatMode = state.repeatMode,
             onRepeat = viewModel::cycleRepeatMode,
             onMove = viewModel::moveInQueue,
+            onPlayNext = { viewModel.playNext(it.file) },
+            onAddToQueue = { viewModel.addToQueue(it.file) },
+            onRemove = viewModel::removeFromQueue,
+            onClearPending = viewModel::clearPendingQueue,
+            onInfo = { entry ->
+                infoTarget = entry.file
+                infoReturnView = currentView
+                currentView = MainView.INFO
+                showQueue = false
+            },
+            onBackToLibrary = { currentView = MainView.LIBRARY; showQueue = false },
             onDismiss = { showQueue = false }
         )
     }
@@ -1081,74 +1112,308 @@ private fun PlayerView(
     }
 
     Column(
-        modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+        modifier = Modifier.fillMaxSize(),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
         PlayerTabSwitcher(tab, onTabChange)
-        Spacer(modifier = Modifier.height(12.dp))
+        if (tab == PlayerTab.COVER) {
+            Column(
+                modifier = Modifier.fillMaxSize().verticalScroll(rememberScrollState()),
+                horizontalAlignment = Alignment.CenterHorizontally
+            ) {
+                Spacer(modifier = Modifier.height(12.dp))
+                Box(
+                    modifier = Modifier.fillMaxWidth(0.9f).aspectRatio(1f),
+                    contentAlignment = Alignment.Center
+                ) {
+                    VinylView(
+                        artwork = file.artwork,
+                        isPlaying = state.isPlaying,
+                        tonearmAnimationEnabled = state.tonearmAnimationEnabled,
+                        modifier = Modifier.fillMaxSize()
+                    )
+                }
+                Spacer(modifier = Modifier.height(18.dp))
+                Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                    Text(file.title, color = Color.White, fontSize = 23.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f))
+                    IconButton(onClick = onFavorite) {
+                        Icon(if (state.isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder, "Favorito", tint = if (state.isFavorite) Color(0xFFE4B45B) else Color.White)
+                    }
+                }
+                Spacer(modifier = Modifier.height(5.dp))
+                Box(Modifier.fillMaxWidth()) {
+                    Text(
+                        "${file.artist} · ${file.album}",
+                        color = Color.White.copy(alpha = 0.65f),
+                        fontSize = 14.sp,
+                        maxLines = 1,
+                        modifier = Modifier.fillMaxWidth().basicMarquee()
+                    )
+                }
+                Spacer(modifier = Modifier.height(12.dp))
+                Slider(
+                    value = progress(state.positionMs, state.durationMs),
+                    onValueChange = onSeek,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = playerSliderColors()
+                )
+                Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
+                    Text(formatTime(state.positionMs), color = Color.White.copy(alpha = 0.55f), fontSize = 11.sp)
+                    Text(formatTime(state.durationMs), color = Color.White.copy(alpha = 0.55f), fontSize = 11.sp)
+                }
+                PlayerTransportControls(
+                    state = state,
+                    onTogglePlayback = onTogglePlayback,
+                    onPrevious = onPrevious,
+                    onNext = onNext,
+                    onShuffle = onShuffle,
+                    onRepeat = onRepeat,
+                    onQueue = onQueue,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+        } else {
+            var followLyrics by remember(file.uri) { mutableStateOf(true) }
+            BoxWithConstraints(Modifier.fillMaxSize()) {
+                val coverSize = when {
+                    maxHeight < 420.dp -> 52.dp
+                    maxHeight < 540.dp -> 68.dp
+                    maxHeight < 640.dp -> 84.dp
+                    else -> 100.dp
+                }
+                Column(
+                    modifier = Modifier.fillMaxSize(),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    LyricsPlayerHeader(
+                        file = file,
+                        state = state,
+                        isFavorite = state.isFavorite,
+                        onFavorite = onFavorite,
+                        onSeek = {
+                            onSeek(it)
+                            followLyrics = true
+                        },
+                        coverSize = coverSize
+                    )
+                    if (state.lyricsStatus == LyricsStatus.AVAILABLE) {
+                        LyricsOptionsRow(
+                            showTranslation = state.showTranslatedLyrics,
+                            translationLoading = state.translationLoading,
+                            translationError = state.translationError,
+                            offsetMs = state.lyricsOffsetMs,
+                            onToggleTranslation = onToggleLyricsTranslation,
+                            onOffsetChange = onLyricsOffsetChange
+                        )
+                    }
+                    Box(Modifier.weight(1f).fillMaxWidth()) {
+                        key(file.uri) {
+                            LyricsOverlay(
+                                lyrics = state.lyrics,
+                                status = state.lyricsStatus,
+                                positionMs = state.positionMs,
+                                offsetMs = state.lyricsOffsetMs,
+                                showTranslation = state.showTranslatedLyrics,
+                                followLyrics = followLyrics,
+                                onManualScroll = { followLyrics = false },
+                                onResumeFollow = { followLyrics = true },
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+                    }
+                    PlayerTransportControls(
+                        state = state,
+                        onTogglePlayback = onTogglePlayback,
+                        onPrevious = onPrevious,
+                        onNext = onNext,
+                        onShuffle = onShuffle,
+                        onRepeat = onRepeat,
+                        onQueue = onQueue,
+                        compact = true,
+                        modifier = Modifier.fillMaxWidth()
+                    )
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun LyricsPlayerHeader(
+    file: MusicFile,
+    state: PlayerUiState,
+    isFavorite: Boolean,
+    onFavorite: () -> Unit,
+    onSeek: (Float) -> Unit,
+    coverSize: androidx.compose.ui.unit.Dp
+) {
+    Column(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
+        horizontalAlignment = Alignment.CenterHorizontally
+    ) {
         Box(
-            modifier = Modifier.fillMaxWidth(0.9f).aspectRatio(1f),
+            modifier = Modifier
+                .size(coverSize)
+                .shadow(14.dp, RoundedCornerShape(6.dp))
+                .clip(RoundedCornerShape(6.dp))
+                .background(Color(0xFF31131B)),
             contentAlignment = Alignment.Center
         ) {
-            VinylView(
-                artwork = file.artwork,
-                isPlaying = state.isPlaying,
-                tonearmAnimationEnabled = state.tonearmAnimationEnabled,
-                modifier = Modifier.fillMaxSize()
+            if (file.artwork != null) {
+                Image(
+                    bitmap = file.artwork.asImageBitmap(),
+                    contentDescription = "Portada de ${file.title}",
+                    modifier = Modifier.fillMaxSize(),
+                    contentScale = ContentScale.Crop
+                )
+            } else {
+                Icon(Icons.Default.MusicNote, contentDescription = null, tint = Color.White.copy(alpha = 0.8f), modifier = Modifier.size(42.dp))
+            }
+        }
+        Spacer(Modifier.height(3.dp))
+        Box(Modifier.fillMaxWidth().heightIn(min = 32.dp)) {
+            Text(
+                file.title,
+                color = Color.White,
+                fontSize = 20.sp,
+                fontWeight = FontWeight.Bold,
+                maxLines = 1,
+                modifier = Modifier.fillMaxWidth().align(Alignment.Center).padding(horizontal = 44.dp),
+                textAlign = TextAlign.Center
             )
-            if (tab == PlayerTab.LYRICS) {
-                LyricsOverlay(
-                    lyrics = state.lyrics,
-                    status = state.lyricsStatus,
-                    positionMs = state.positionMs,
-                    offsetMs = state.lyricsOffsetMs,
-                    onOffsetChange = onLyricsOffsetChange,
-                    showTranslation = state.showTranslatedLyrics,
-                    translationLoading = state.translationLoading,
-                    translationError = state.translationError,
-                    onToggleTranslation = onToggleLyricsTranslation
+            IconButton(onClick = onFavorite, modifier = Modifier.align(Alignment.CenterEnd)) {
+                Icon(
+                    if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+                    "Favorito",
+                    tint = if (isFavorite) Color(0xFFE4B45B) else Color.White
                 )
             }
         }
-        Spacer(modifier = Modifier.height(18.dp))
-        Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
-            Text(file.title, color = Color.White, fontSize = 23.sp, fontWeight = FontWeight.Bold, maxLines = 1, modifier = Modifier.weight(1f))
-            IconButton(onClick = onFavorite) {
-                Icon(if (state.isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder, "Favorito", tint = if (state.isFavorite) Color(0xFFE4B45B) else Color.White)
+        if (coverSize < 84.dp) {
+            Text(
+                listOf(file.artist, file.album).filter { it.isNotBlank() }.joinToString(" · "),
+                color = Color.White.copy(alpha = 0.82f),
+                fontSize = 12.sp,
+                maxLines = 1
+            )
+        } else {
+            Text(file.artist, color = Color.White.copy(alpha = 0.92f), fontSize = 14.sp, maxLines = 1)
+            if (file.album.isNotBlank()) {
+                Text(file.album, color = Color.White.copy(alpha = 0.72f), fontSize = 11.sp, maxLines = 1)
             }
         }
-        Spacer(modifier = Modifier.height(5.dp))
-        Box(Modifier.fillMaxWidth()) {
-            Text(
-                "${file.artist} · ${file.album}",
-                color = Color.White.copy(alpha = 0.65f),
-                fontSize = 14.sp,
-                maxLines = 1,
-                modifier = Modifier.fillMaxWidth().basicMarquee()
-            )
-        }
-        Spacer(modifier = Modifier.height(12.dp))
         Slider(
             value = progress(state.positionMs, state.durationMs),
             onValueChange = onSeek,
             modifier = Modifier.fillMaxWidth(),
-            colors = androidx.compose.material3.SliderDefaults.colors(
-                thumbColor = Color(0xFFE4B45B),
-                activeTrackColor = Color(0xFFE4B45B),
-                inactiveTrackColor = Color.White.copy(alpha = 0.25f)
-            )
+            colors = playerSliderColors()
         )
-        Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
-            Text(formatTime(state.positionMs), color = Color.White.copy(alpha = 0.55f), fontSize = 11.sp)
-            Text(formatTime(state.durationMs), color = Color.White.copy(alpha = 0.55f), fontSize = 11.sp)
+        Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), Arrangement.SpaceBetween) {
+            Text(formatTime(state.positionMs), color = Color.White.copy(alpha = 0.72f), fontSize = 11.sp)
+            Text(formatTime(state.durationMs), color = Color.White.copy(alpha = 0.72f), fontSize = 11.sp)
         }
-        Spacer(modifier = Modifier.height(10.dp))
-        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.SpaceEvenly, modifier = Modifier.fillMaxWidth()) {
+    }
+}
+
+@Composable
+private fun LyricsOptionsRow(
+    showTranslation: Boolean,
+    translationLoading: Boolean,
+    translationError: String?,
+    offsetMs: Long,
+    onToggleTranslation: () -> Unit,
+    onOffsetChange: (Long) -> Unit
+) {
+    var fineStep by rememberSaveable { mutableStateOf(true) }
+    val stepMs = if (fineStep) 500L else 5_000L
+    val stepLabel = if (fineStep) "0,5 s" else "5 s"
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        val compactControls = maxWidth < 340.dp
+        Column(Modifier.fillMaxWidth().padding(horizontal = 2.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth().heightIn(min = 40.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.Center
+            ) {
+                TextButton(onClick = onToggleTranslation, enabled = !translationLoading, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp)) {
+                    Text(if (showTranslation) "Original" else "Traducir", fontSize = 12.sp, maxLines = 1)
+                }
+                if (compactControls) {
+                    Spacer(Modifier.weight(1f))
+                } else {
+                    IconButton(onClick = { onOffsetChange(-stepMs) }, modifier = Modifier.size(42.dp)) { Text("−$stepLabel", color = Color.White, fontSize = 10.sp) }
+                    Text(formatOffset(offsetMs), color = Color.White.copy(alpha = 0.72f), fontSize = 11.sp)
+                    IconButton(onClick = { onOffsetChange(stepMs) }, modifier = Modifier.size(42.dp)) { Text("+$stepLabel", color = Color.White, fontSize = 10.sp) }
+                }
+                TextButton(
+                    onClick = { fineStep = !fineStep },
+                    contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 4.dp)
+                ) {
+                    Text("Paso $stepLabel", fontSize = 10.sp, maxLines = 1)
+                }
+                IconButton(
+                    onClick = { onOffsetChange(-offsetMs) },
+                    modifier = Modifier.size(42.dp)
+                ) {
+                    Icon(Icons.Default.Refresh, "Restablecer sincronización", tint = Color.White.copy(alpha = 0.76f))
+                }
+            }
+            if (compactControls) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    IconButton(onClick = { onOffsetChange(-stepMs) }, modifier = Modifier.size(42.dp)) { Text("−$stepLabel", color = Color.White, fontSize = 10.sp) }
+                    Text(formatOffset(offsetMs), color = Color.White.copy(alpha = 0.72f), fontSize = 11.sp)
+                    IconButton(onClick = { onOffsetChange(stepMs) }, modifier = Modifier.size(42.dp)) { Text("+$stepLabel", color = Color.White, fontSize = 10.sp) }
+                }
+            }
+            if (translationLoading || translationError != null) {
+                Text(
+                    text = if (translationLoading) "Traduciendo letra..." else translationError.orEmpty(),
+                    color = if (translationLoading) Color(0xFFFFD5A6) else Color(0xFFFFB4AB),
+                    fontSize = 11.sp,
+                    textAlign = TextAlign.Center,
+                    maxLines = 2,
+                    modifier = Modifier.fillMaxWidth().padding(bottom = 2.dp)
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun playerSliderColors() = androidx.compose.material3.SliderDefaults.colors(
+    thumbColor = Color(0xFFE4B45B),
+    activeTrackColor = Color(0xFFE4B45B),
+    inactiveTrackColor = Color.White.copy(alpha = 0.25f)
+)
+
+@Composable
+private fun PlayerTransportControls(
+    state: PlayerUiState,
+    onTogglePlayback: () -> Unit,
+    onPrevious: () -> Unit,
+    onNext: () -> Unit,
+    onShuffle: () -> Unit,
+    onRepeat: () -> Unit,
+    onQueue: () -> Unit,
+    compact: Boolean = false,
+    modifier: Modifier = Modifier
+) {
+    Column(modifier = modifier) {
+        Spacer(modifier = Modifier.height(if (compact) 2.dp else 8.dp))
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.SpaceEvenly,
+            modifier = Modifier.fillMaxWidth()
+        ) {
             IconButton(onClick = onShuffle) {
                 Icon(Icons.Default.Shuffle, "Reproducción aleatoria", tint = if (state.shuffleEnabled) Color(0xFFE4B45B) else Color.White)
             }
             IconButton(onClick = onPrevious) { Icon(Icons.Default.ArrowBack, "Anterior", tint = Color.White) }
-            Surface(Modifier.size(70.dp), CircleShape, Color(0xFFE4B45B)) {
+            Surface(Modifier.size(if (compact) 52.dp else 70.dp), CircleShape, Color(0xFFE4B45B)) {
                 IconButton(onClick = onTogglePlayback) {
                     Icon(if (state.isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow, "Reproducir", tint = Color(0xFF17120A), modifier = Modifier.size(36.dp))
                 }
@@ -1161,11 +1426,18 @@ private fun PlayerView(
                     tint = if (state.repeatMode == RepeatMode.OFF) Color.White.copy(alpha = 0.55f) else Color(0xFFE4B45B)
                 )
             }
+            if (compact) {
+                IconButton(onClick = onQueue) {
+                    Icon(Icons.Default.QueueMusic, "Fila de reproducción", tint = Color.White)
+                }
+            }
         }
-        TextButton(onClick = onQueue) {
-            Icon(Icons.Default.QueueMusic, null)
-            Spacer(Modifier.width(6.dp))
-            Text("Fila de reproducción")
+        if (!compact) {
+            TextButton(onClick = onQueue, modifier = Modifier.align(Alignment.CenterHorizontally)) {
+                Icon(Icons.Default.QueueMusic, null)
+                Spacer(Modifier.width(6.dp))
+                Text("Fila de reproducción")
+            }
         }
     }
 }
@@ -1275,11 +1547,11 @@ private fun LyricsOverlay(
     status: LyricsStatus,
     positionMs: Long,
     offsetMs: Long,
-    onOffsetChange: (Long) -> Unit,
     showTranslation: Boolean,
-    translationLoading: Boolean,
-    translationError: String?,
-    onToggleTranslation: () -> Unit
+    followLyrics: Boolean,
+    onManualScroll: () -> Unit,
+    onResumeFollow: () -> Unit,
+    modifier: Modifier = Modifier
 ) {
     val activeSyncedText = if (showTranslation) lyrics?.translatedSyncedText else lyrics?.syncedText
     val activePlainText = if (showTranslation) lyrics?.translatedText else lyrics?.text
@@ -1288,99 +1560,104 @@ private fun LyricsOverlay(
     }
     val currentLine = syncedLines.indexOfLast { it.startMs <= positionMs + offsetMs }
     val listState = rememberLazyListState()
-    LaunchedEffect(currentLine, status) {
-        if (status == LyricsStatus.AVAILABLE && currentLine >= 0) {
-            listState.animateScrollToItem(currentLine)
+    var isAutoScrolling by remember { mutableStateOf(false) }
+    BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
+        val verticalInset = (maxHeight / 2f - 34.dp).coerceAtLeast(24.dp)
+        val centerLyrics = followLyrics && currentLine >= 2 && syncedLines.isNotEmpty()
+        LaunchedEffect(listState) {
+            snapshotFlow { listState.isScrollInProgress to isAutoScrolling }.collect { (scrolling, autoScrolling) ->
+                if (scrolling && !autoScrolling) onManualScroll()
+            }
         }
-    }
-    Box(modifier = Modifier.fillMaxSize().padding(8.dp)) {
-        when (status) {
-            LyricsStatus.AVAILABLE -> {
-                if (syncedLines.isNotEmpty()) {
-                    Column(Modifier.fillMaxSize()) {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                            TextButton(onClick = onToggleTranslation, enabled = !translationLoading) {
-                                Text(if (showTranslation) "Ver original" else "Traducir al español")
-                            }
+        LaunchedEffect(currentLine, status, centerLyrics, followLyrics, verticalInset) {
+            if (followLyrics && status == LyricsStatus.AVAILABLE && syncedLines.isNotEmpty()) {
+                isAutoScrolling = true
+                try {
+                    // Start at the top until there is enough previous context to center the active line.
+                    val targetLine = if (currentLine in 0..1) 0 else currentLine.coerceAtLeast(0)
+                    listState.animateScrollToItem(targetLine)
+                } finally {
+                    isAutoScrolling = false
+                }
+            }
+        }
+        Box(Modifier.fillMaxSize()) {
+            when (status) {
+                LyricsStatus.AVAILABLE -> {
+                    LazyColumn(
+                        state = listState,
+                        modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
+                        contentPadding = PaddingValues(
+                            start = 8.dp,
+                            end = 8.dp,
+                            top = if (centerLyrics) verticalInset else 0.dp,
+                            bottom = if (centerLyrics) verticalInset else 0.dp
+                        ),
+                        verticalArrangement = if (syncedLines.isNotEmpty()) {
+                            Arrangement.spacedBy(14.dp)
+                        } else {
+                            Arrangement.spacedBy(4.dp)
                         }
-                        Row(
-                            modifier = Modifier.fillMaxWidth().padding(horizontal = 8.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.Center
-                        ) {
-                            TextButton(onClick = { onOffsetChange(-500L) }) { Text("−0,5 s") }
-                            Text("Ajuste ${formatOffset(offsetMs)}", color = Color.White.copy(alpha = 0.62f), fontSize = 11.sp)
-                            TextButton(onClick = { onOffsetChange(500L) }) { Text("+0,5 s") }
-                        }
-                        if (translationLoading) {
-                            Text(
-                                "Traduciendo letra...",
-                                color = Color(0xFFE4B45B),
-                                fontSize = 12.sp,
-                                modifier = Modifier.fillMaxWidth(),
-                                textAlign = TextAlign.Center
-                            )
-                        }
-                        translationError?.let { error ->
-                            Text(error, color = Color(0xFFFF8A80), fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
-                        }
-                        LazyColumn(
-                            state = listState,
-                            modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp),
-                            contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 28.dp),
-                            verticalArrangement = Arrangement.spacedBy(8.dp)
-                        ) {
+                    ) {
+                        if (syncedLines.isNotEmpty()) {
                             itemsIndexed(syncedLines) { index, line ->
+                                val distance = if (currentLine >= 0) abs(index - currentLine) else 1
                                 Text(
                                     line.text,
-                                    color = if (index == currentLine) Color(0xFFE4B45B) else Color.White.copy(alpha = 0.82f),
-                                    fontSize = if (index == currentLine) 22.sp else 19.sp,
-                                    fontWeight = if (index == currentLine) FontWeight.Bold else FontWeight.Normal,
-                                    textAlign = TextAlign.Center,
+                                    color = Color.White.copy(alpha = when (distance) {
+                                        0 -> 1f
+                                        1 -> 0.72f
+                                        else -> 0.42f
+                                    }),
+                                    fontSize = when (distance) {
+                                        0 -> 27.sp
+                                        1 -> 22.sp
+                                        else -> 19.sp
+                                    },
+                                    fontWeight = if (distance == 0) FontWeight.Bold else FontWeight.SemiBold,
+                                    textAlign = TextAlign.Start,
                                     modifier = Modifier.fillMaxWidth(),
                                     style = androidx.compose.ui.text.TextStyle(
-                                        shadow = Shadow(Color.Black.copy(alpha = 0.85f), blurRadius = 8f)
+                                        shadow = Shadow(Color.Black.copy(alpha = 0.82f), blurRadius = 8f)
                                     )
                                 )
                             }
-                        }
-                    }
-                } else {
-                    Column(Modifier.fillMaxSize()) {
-                        Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Center) {
-                            TextButton(onClick = onToggleTranslation, enabled = !translationLoading) {
-                                Text(if (showTranslation) "Ver original" else "Traducir al español")
-                            }
-                        }
-                        translationError?.let { error ->
-                            Text(error, color = Color(0xFFFF8A80), fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
-                        }
-                        LazyColumn(
-                            modifier = Modifier.fillMaxWidth().weight(1f).padding(horizontal = 12.dp),
-                            contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 28.dp)
-                        ) {
+                        } else {
                             items(activePlainText?.lines().orEmpty()) { line ->
                                 Text(
                                     line,
-                                    color = Color.White.copy(alpha = 0.85f),
-                                    fontSize = 19.sp,
-                                    textAlign = TextAlign.Center,
+                                    color = Color.White.copy(alpha = 0.88f),
+                                    fontSize = 22.sp,
+                                    fontWeight = FontWeight.SemiBold,
+                                    textAlign = TextAlign.Start,
                                     modifier = Modifier.fillMaxWidth().padding(vertical = 5.dp),
                                     style = androidx.compose.ui.text.TextStyle(
-                                        shadow = Shadow(Color.Black.copy(alpha = 0.85f), blurRadius = 8f)
+                                        shadow = Shadow(Color.Black.copy(alpha = 0.82f), blurRadius = 8f)
                                     )
                                 )
                             }
                         }
                     }
+                    if (!followLyrics && syncedLines.isNotEmpty()) {
+                        TextButton(
+                            onClick = onResumeFollow,
+                            modifier = Modifier
+                                .align(Alignment.TopEnd)
+                                .padding(top = 2.dp, end = 8.dp)
+                                .clip(RoundedCornerShape(18.dp))
+                                .background(Color(0xAA211116))
+                        ) {
+                            Text("Seguir letra", color = Color.White, fontSize = 11.sp)
+                        }
+                    }
                 }
+                LyricsStatus.LOADING -> LyricsStatusMessage("Cargando letra...")
+                LyricsStatus.NOT_FOUND -> LyricsStatusMessage("Letra no encontrada")
+                LyricsStatus.OFFLINE -> LyricsStatusMessage("Sin conexión")
+                LyricsStatus.TEMPORARY_ERROR -> LyricsStatusMessage("No se pudo cargar la letra")
+                LyricsStatus.INSUFFICIENT_METADATA -> LyricsStatusMessage("Metadatos insuficientes")
+                LyricsStatus.IDLE -> LyricsStatusMessage("Selecciona una canción")
             }
-            LyricsStatus.LOADING -> LyricsStatusMessage("Cargando letra...")
-            LyricsStatus.NOT_FOUND -> LyricsStatusMessage("Letra no encontrada")
-            LyricsStatus.OFFLINE -> LyricsStatusMessage("Sin conexión")
-            LyricsStatus.TEMPORARY_ERROR -> LyricsStatusMessage("No se pudo cargar la letra")
-            LyricsStatus.INSUFFICIENT_METADATA -> LyricsStatusMessage("Metadatos insuficientes")
-            LyricsStatus.IDLE -> LyricsStatusMessage("Selecciona una canción")
         }
     }
 }
@@ -1729,22 +2006,59 @@ private fun SettingsDialog(
 @Composable
 @OptIn(ExperimentalMaterial3Api::class)
 private fun QueueDialog(
-    queue: List<com.chrismdz.vinylplayer.data.MusicFile>,
-    currentUri: android.net.Uri?,
-    onSelect: (com.chrismdz.vinylplayer.data.MusicFile) -> Unit,
+    queue: List<QueueEntry>,
+    currentEntryId: String?,
+    onSelect: (QueueEntry) -> Unit,
     repeatMode: RepeatMode,
     onRepeat: () -> Unit,
-    onMove: (String, String) -> Unit,
+    onMove: (String, String?, Boolean) -> Unit,
+    onPlayNext: (QueueEntry) -> Unit,
+    onAddToQueue: (QueueEntry) -> Unit,
+    onRemove: (String) -> Unit,
+    onClearPending: () -> Unit,
+    onInfo: (QueueEntry) -> Unit,
+    onBackToLibrary: () -> Unit,
     onDismiss: () -> Unit
 ) {
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val orderedQueue = remember(queue, currentUri) {
-        val currentIndex = queue.indexOfFirst { it.uri == currentUri }
-        if (currentIndex > 0) queue.drop(currentIndex) + queue.take(currentIndex) else queue
-    }
+    val currentIndex = queue.indexOfFirst { it.id == currentEntryId }
+    val currentEntry = queue.getOrNull(currentIndex)
+    val upcoming = queue.drop((currentIndex + 1).coerceIn(0, queue.size))
     val queueListState = rememberLazyListState()
-    var draggingUri by remember { mutableStateOf<String?>(null) }
-    var dropTargetUri by remember { mutableStateOf<String?>(null) }
+    var draggingId by remember { mutableStateOf<String?>(null) }
+    var dropTargetId by remember { mutableStateOf<String?>(null) }
+    var dropAfterTarget by remember { mutableStateOf(false) }
+    var draggedOffsetPx by remember { mutableStateOf(0f) }
+    var showQueueOptions by remember { mutableStateOf(false) }
+    var confirmClear by remember { mutableStateOf(false) }
+    var queueMessage by remember { mutableStateOf<String?>(null) }
+
+    LaunchedEffect(queueMessage) {
+        if (queueMessage != null) {
+            delay(1800)
+            queueMessage = null
+        }
+    }
+    LaunchedEffect(draggingId) {
+        while (draggingId != null) {
+            val visibleItems = queueListState.layoutInfo.visibleItemsInfo
+            val draggedItem = visibleItems.firstOrNull { it.key == draggingId }
+            if (draggedItem != null && visibleItems.isNotEmpty()) {
+                val center = draggedItem.offset + draggedItem.size / 2 + draggedOffsetPx.toInt()
+                val layout = queueListState.layoutInfo
+                val firstIndex = visibleItems.first().index
+                val lastIndex = visibleItems.last().index
+                when {
+                    center < layout.viewportStartOffset + 58 && firstIndex > 0 ->
+                        queueListState.animateScrollToItem(firstIndex - 1)
+                    center > layout.viewportEndOffset - 58 && lastIndex < upcoming.lastIndex ->
+                        queueListState.animateScrollToItem(lastIndex + 1)
+                }
+            }
+            delay(48)
+        }
+    }
+
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -1763,47 +2077,147 @@ private fun QueueDialog(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
+                .fillMaxHeight(0.92f)
                 .padding(horizontal = 20.dp)
         ) {
-            Text("Fila de reproducción", fontSize = 27.sp, fontWeight = FontWeight.Bold)
-            Text(
-                text = queue.firstOrNull { it.uri == currentUri }?.let { "Reproduciendo ${it.title}" }
-                    ?: "Lista actual",
-                color = Color.White.copy(alpha = 0.62f),
-                fontSize = 15.sp
-            )
-            Spacer(Modifier.height(14.dp))
-            if (orderedQueue.isEmpty()) {
-                Text("La fila está vacía.", color = Color.White.copy(alpha = 0.7f))
-            } else {
-                LazyColumn(state = queueListState, modifier = Modifier.heightIn(max = 430.dp)) {
-                    items(orderedQueue, key = { it.uri.toString() }) { file ->
-                        QueueRow(
-                            file = file,
-                            isCurrent = file.uri == currentUri,
-                            orderedQueue = orderedQueue,
-                            onSelect = onSelect,
-                            isDragging = file.uri.toString() == draggingUri,
-                            isDropTarget = file.uri.toString() == dropTargetUri,
-                            onDragStart = {
-                                draggingUri = file.uri.toString()
-                                dropTargetUri = null
-                            },
-                            onDragTarget = { target -> dropTargetUri = target.uri.toString() },
-                            onDragEnd = {
-                                draggingUri = null
-                                dropTargetUri = null
-                            },
-                            onMove = { item, steps ->
-                                val from = orderedQueue.indexOfFirst { it.uri == item.uri }
-                                val target = (from + steps).coerceIn(0, orderedQueue.lastIndex)
-                                if (from >= 0 && target != from) onMove(item.uri.toString(), orderedQueue[target].uri.toString())
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Column(Modifier.weight(1f)) {
+                    Text("Fila de reproducción", fontSize = 27.sp, fontWeight = FontWeight.Bold)
+                    Text(
+                        text = if (upcoming.size == 1) "1 canción pendiente" else "${upcoming.size} canciones pendientes",
+                        color = Color.White.copy(alpha = 0.62f),
+                        fontSize = 14.sp
+                    )
+                }
+                Box {
+                    IconButton(onClick = { showQueueOptions = true }) {
+                        Icon(Icons.Default.MoreVert, "Opciones de la fila", tint = Color.White)
+                    }
+                    DropdownMenu(
+                        expanded = showQueueOptions,
+                        onDismissRequest = { showQueueOptions = false }
+                    ) {
+                        DropdownMenuItem(
+                            text = { Text("Vaciar canciones pendientes") },
+                            enabled = upcoming.isNotEmpty(),
+                            onClick = {
+                                showQueueOptions = false
+                                if (upcoming.size > 5) confirmClear = true else onClearPending()
                             }
                         )
                     }
                 }
             }
-            Spacer(Modifier.height(12.dp))
+            Spacer(Modifier.height(10.dp))
+            if (currentEntry != null) {
+                Text("Reproduciendo ahora", color = Color(0xFFE4B45B), fontWeight = FontWeight.Bold, fontSize = 14.sp)
+                QueueRow(
+                    entry = currentEntry,
+                    isCurrent = true,
+                    allowReorder = false,
+                    isDragging = false,
+                    isDropTarget = false,
+                    onSelect = { onSelect(currentEntry) },
+                    onDragStart = {},
+                    onDragOffset = {},
+                    onDragEnd = {},
+                    onPlayNext = { onPlayNext(currentEntry); queueMessage = "Se reproducirá a continuación" },
+                    onAddToQueue = { onAddToQueue(currentEntry); queueMessage = "Agregada al final de la fila" },
+                    onRemove = { onRemove(currentEntry.id); queueMessage = "Quitada de la fila" },
+                    onInfo = { onInfo(currentEntry) }
+                )
+            }
+            Row(
+                modifier = Modifier.fillMaxWidth().padding(top = 9.dp, bottom = 4.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text("A continuación", color = Color.White, fontWeight = FontWeight.Bold, fontSize = 16.sp)
+                Spacer(Modifier.width(8.dp))
+                Text("${upcoming.size}", color = Color.White.copy(alpha = 0.5f), fontSize = 13.sp)
+            }
+            when {
+                upcoming.isEmpty() && currentEntry == null -> {
+                    Column(
+                        modifier = Modifier.fillMaxWidth().weight(1f),
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        verticalArrangement = Arrangement.Center
+                    ) {
+                        Icon(Icons.Default.QueueMusic, null, tint = Color(0xFFE4B45B), modifier = Modifier.size(42.dp))
+                        Spacer(Modifier.height(10.dp))
+                        Text("La fila está vacía", color = Color.White, fontWeight = FontWeight.SemiBold)
+                        Text("Elige canciones de tu biblioteca para empezar.", color = Color.White.copy(alpha = 0.6f), fontSize = 13.sp)
+                        TextButton(onClick = onBackToLibrary) { Text("Volver a la biblioteca", color = Color(0xFFE4B45B)) }
+                    }
+                }
+                upcoming.isEmpty() -> {
+                    Box(Modifier.fillMaxWidth().weight(1f), contentAlignment = Alignment.Center) {
+                        Text("No hay canciones pendientes", color = Color.White.copy(alpha = 0.58f))
+                    }
+                }
+                else -> {
+                    LazyColumn(
+                        state = queueListState,
+                        modifier = Modifier.fillMaxWidth().weight(1f),
+                        contentPadding = PaddingValues(bottom = 8.dp)
+                    ) {
+                        items(upcoming, key = { it.id }) { entry ->
+                            QueueRow(
+                                entry = entry,
+                                isCurrent = false,
+                                allowReorder = true,
+                                isDragging = entry.id == draggingId,
+                                isDropTarget = entry.id == dropTargetId,
+                                onSelect = { onSelect(entry) },
+                                onDragStart = {
+                                    draggingId = entry.id
+                                    dropTargetId = entry.id
+                                    dropAfterTarget = false
+                                    draggedOffsetPx = 0f
+                                },
+                                onDragOffset = { offset ->
+                                    draggedOffsetPx = offset
+                                    val visible = queueListState.layoutInfo.visibleItemsInfo
+                                    val dragged = visible.firstOrNull { it.key == entry.id }
+                                    if (dragged == null) {
+                                        dropTargetId = entry.id
+                                        dropAfterTarget = false
+                                    } else {
+                                        val center = dragged.offset + dragged.size / 2 + offset.toInt()
+                                        val target = visible
+                                            .filter { it.key != entry.id }
+                                            .minByOrNull { abs(it.offset + it.size / 2 - center) }
+                                        val lastVisible = visible.lastOrNull()
+                                        if (target != null && lastVisible?.index == upcoming.lastIndex && center > lastVisible.offset + lastVisible.size / 2) {
+                                            dropTargetId = null
+                                            dropAfterTarget = true
+                                        } else {
+                                            dropTargetId = target?.key as? String ?: entry.id
+                                            dropAfterTarget = target != null && center > target.offset + target.size / 2
+                                        }
+                                    }
+                                },
+                                onDragEnd = { completed ->
+                                    val movingId = draggingId
+                                    if (completed && movingId != null && (dropTargetId != movingId || dropAfterTarget) &&
+                                        (dropTargetId != null || dropAfterTarget)
+                                    ) {
+                                        onMove(movingId, dropTargetId, dropAfterTarget)
+                                    }
+                                    draggingId = null
+                                    dropTargetId = null
+                                    dropAfterTarget = false
+                                    draggedOffsetPx = 0f
+                                },
+                                onPlayNext = { onPlayNext(entry); queueMessage = "Se reproducirá a continuación" },
+                                onAddToQueue = { onAddToQueue(entry); queueMessage = "Agregada al final de la fila" },
+                                onRemove = { onRemove(entry.id); queueMessage = "Quitada de la fila" },
+                                onInfo = { onInfo(entry) }
+                            )
+                        }
+                    }
+                }
+            }
+            queueMessage?.let { Text(it, color = Color(0xFFE4B45B), fontSize = 13.sp, modifier = Modifier.padding(vertical = 5.dp)) }
             Row(
                 modifier = Modifier.fillMaxWidth().padding(bottom = 12.dp),
                 horizontalArrangement = Arrangement.Center
@@ -1838,22 +2252,40 @@ private fun QueueDialog(
             }
         }
     }
+    if (confirmClear) {
+        AlertDialog(
+            onDismissRequest = { confirmClear = false },
+            title = { Text("Vaciar canciones pendientes") },
+            text = { Text("Se quitarán ${upcoming.size} canciones de la fila. La canción actual seguirá reproduciéndose.") },
+            confirmButton = {
+                TextButton(onClick = { confirmClear = false; onClearPending() }) {
+                    Text("Vaciar", color = Color(0xFFE4B45B))
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirmClear = false }) { Text("Cancelar") } }
+        )
+    }
 }
 
 @Composable
 private fun QueueRow(
-    file: com.chrismdz.vinylplayer.data.MusicFile,
+    entry: QueueEntry,
     isCurrent: Boolean,
-    orderedQueue: List<com.chrismdz.vinylplayer.data.MusicFile>,
-    onSelect: (com.chrismdz.vinylplayer.data.MusicFile) -> Unit,
+    allowReorder: Boolean = true,
+    onSelect: () -> Unit,
     isDragging: Boolean,
     isDropTarget: Boolean,
     onDragStart: () -> Unit,
-    onDragTarget: (com.chrismdz.vinylplayer.data.MusicFile) -> Unit,
-    onDragEnd: () -> Unit,
-    onMove: (com.chrismdz.vinylplayer.data.MusicFile, Int) -> Unit
+    onDragOffset: (Float) -> Unit,
+    onDragEnd: (Boolean) -> Unit,
+    onPlayNext: () -> Unit,
+    onAddToQueue: () -> Unit,
+    onRemove: () -> Unit,
+    onInfo: () -> Unit
 ) {
-    var dragDistance = 0f
+    val file = entry.file
+    var dragDistance by remember(entry.id) { mutableStateOf(0f) }
+    var showActions by remember(entry.id) { mutableStateOf(false) }
     val rowScale by animateFloatAsState(if (isDragging) 1.035f else 1f, label = "queue-drag-scale")
     Row(
         modifier = Modifier
@@ -1867,27 +2299,21 @@ private fun QueueRow(
                 shape = RoundedCornerShape(12.dp)
             )
             .background(if (isDragging) Color(0x665E4923) else if (isCurrent) Color(0x334CAF70) else Color.Transparent)
-            .pointerInput(file.uri) {
-                detectDragGesturesAfterLongPress(
-                    onDragStart = { dragDistance = 0f; onDragStart() },
-                    onDragCancel = { dragDistance = 0f; onDragEnd() },
-                    onDragEnd = { dragDistance = 0f; onDragEnd() },
-                    onDrag = { change, amount ->
-                        change.consume()
-                        dragDistance += amount.y
-                        val rowHeight = 72.dp.toPx()
-                        val steps = (dragDistance / rowHeight).toInt()
-                        if (steps != 0) {
-                            val from = orderedQueue.indexOfFirst { it.uri == file.uri }
-                            val target = (from + steps).coerceIn(0, orderedQueue.lastIndex)
-                            if (from >= 0 && target != from) onDragTarget(orderedQueue[target])
-                            onMove(file, steps)
-                            dragDistance -= steps * rowHeight
+            .then(
+                if (allowReorder) Modifier.pointerInput(entry.id) {
+                    detectDragGesturesAfterLongPress(
+                        onDragStart = { dragDistance = 0f; onDragStart() },
+                        onDragCancel = { dragDistance = 0f; onDragEnd(false) },
+                        onDragEnd = { dragDistance = 0f; onDragEnd(true) },
+                        onDrag = { change, amount ->
+                            change.consume()
+                            dragDistance += amount.y
+                            onDragOffset(dragDistance)
                         }
-                    }
-                )
-            }
-            .clickable { onSelect(file) }
+                    )
+                } else Modifier
+            )
+            .clickable(onClick = onSelect)
             .padding(vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
@@ -1907,12 +2333,23 @@ private fun QueueRow(
             Text(file.title, color = if (isCurrent) Color(0xFF41D476) else Color.White, fontSize = 17.sp, maxLines = 1)
             Text(file.artist, color = Color.White.copy(alpha = 0.62f), fontSize = 13.sp, maxLines = 1)
         }
-        Icon(
-            if (isCurrent) Icons.Default.Pause else Icons.Default.QueueMusic,
-            null,
-            tint = if (isCurrent) Color.White else Color.White.copy(alpha = 0.75f),
-            modifier = Modifier.size(22.dp)
-        )
+        if (isCurrent) {
+            Icon(Icons.Default.Pause, "Reproduciendo", tint = Color(0xFFE4B45B), modifier = Modifier.size(22.dp))
+        }
+        Box {
+            IconButton(onClick = { showActions = true }) {
+                Icon(Icons.Default.MoreVert, "Acciones de ${file.title}", tint = Color.White.copy(alpha = 0.78f))
+            }
+            DropdownMenu(expanded = showActions, onDismissRequest = { showActions = false }) {
+                DropdownMenuItem(text = { Text("Reproducir ahora") }, onClick = { showActions = false; onSelect() })
+                if (!isCurrent) {
+                    DropdownMenuItem(text = { Text("Reproducir a continuación") }, onClick = { showActions = false; onPlayNext() })
+                }
+                DropdownMenuItem(text = { Text("Agregar al final") }, onClick = { showActions = false; onAddToQueue() })
+                DropdownMenuItem(text = { Text("Información") }, onClick = { showActions = false; onInfo() })
+                DropdownMenuItem(text = { Text("Quitar de la fila") }, onClick = { showActions = false; onRemove() })
+            }
+        }
     }
 }
 

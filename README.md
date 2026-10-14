@@ -1,18 +1,37 @@
 # VinylPlayer
 
-Reproductor de música Android ligero, creado con Kotlin, Jetpack Compose y Media3.
+Reproductor de música local para Android, desarrollado con Kotlin, Jetpack Compose y Media3.
 
-## Primera versión
+## Funciones
 
-- Selección de archivos MP3 locales.
-- Lectura de título, artista, álbum y carátula.
-- Reproducción y pausa.
-- Barra de progreso.
-- Fondo y vinilo estáticos.
-- Animación únicamente en la etiqueta central.
+- Explora y reproduce archivos de audio del dispositivo.
+- Muestra título, artista, álbum y carátula cuando esos datos están disponibles.
+- Controles de reproducción, progreso, aleatorio y repetición.
+- Fila de reproducción dividida entre la canción actual y las siguientes.
+- Permite reordenar canciones pendientes arrastrándolas, reproducir una a continuación, agregarla al final o quitarla de la fila.
+- La fila y la canción actual se restauran al volver a abrir la app.
+- Busca letras y presenta estados de carga, disponibilidad y conexión.
+- Las letras sincronizadas siguen la canción: la vista comienza desde el inicio para evitar un espacio vacío y centra la línea activa cuando ya hay suficiente contexto anterior.
+- Permite ajustar la sincronización de la letra en ambos sentidos y traducirla cuando hay traducción disponible.
 
-## Abrir en VS Code
+## Requisitos
 
-Abre esta carpeta desde VS Code. La primera compilación puede descargar las dependencias de Gradle.
+- JDK 17
+- Android SDK 34
+- Android 8.0 (API 26) o posterior
 
-El proyecto usa Java 17, Android SDK 34 y `minSdk 26`.
+## Abrir y compilar
+
+Abre esta carpeta en Android Studio o VS Code. Para generar e instalar la versión de depuración en un dispositivo conectado por USB:
+
+```bash
+./gradlew installDebug
+```
+
+Para generar solamente el APK:
+
+```bash
+./gradlew assembleDebug
+```
+
+El APK de depuración se genera en `app/build/outputs/apk/debug/app-debug.apk`.

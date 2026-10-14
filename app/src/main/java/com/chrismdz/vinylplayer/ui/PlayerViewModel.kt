@@ -12,6 +12,7 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.Player
 import com.chrismdz.vinylplayer.data.MusicFile
+import com.chrismdz.vinylplayer.data.QueueEntry
 import com.chrismdz.vinylplayer.data.MusicRepository
 import com.chrismdz.vinylplayer.data.Playlist
 import com.chrismdz.vinylplayer.data.Lyrics
@@ -41,7 +42,8 @@ enum class RepeatMode {
 data class PlayerUiState(
     val musicFile: MusicFile? = null,
     val library: List<MusicFile> = emptyList(),
-    val queue: List<MusicFile> = emptyList(),
+    val queue: List<QueueEntry> = emptyList(),
+    val currentQueueEntryId: String? = null,
     val playlists: List<Playlist> = emptyList(),
     val favoriteUris: Set<String> = emptySet(),
     val isPlaying: Boolean = false,
@@ -67,12 +69,27 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private val favoriteUris = preferences.getStringSet("favorite_uris", emptySet()).orEmpty().toMutableSet()
     private val cachedLibrary = loadCachedLibrary()
     private val cachedCurrentFile = loadCachedCurrentFile()
+    private val cachedQueue = run {
+        val persisted = loadCachedQueue()
+        when {
+            persisted.isEmpty() -> cachedCurrentFile?.let { listOf(QueueEntry.create(it)) }.orEmpty()
+            cachedCurrentFile == null -> persisted
+            persisted.any { it.file.uri == cachedCurrentFile.uri } -> persisted.map { entry ->
+                if (entry.file.uri == cachedCurrentFile.uri) entry.copy(file = cachedCurrentFile) else entry
+            }
+            else -> listOf(QueueEntry.create(cachedCurrentFile)) + persisted
+        }
+    }
+    private val cachedCurrentQueueEntryId = preferences.getString("current_queue_entry_id", null)
+        ?.takeIf { id -> cachedQueue.any { it.id == id } }
+        ?: cachedCurrentFile?.let { file -> cachedQueue.firstOrNull { it.file.uri == file.uri }?.id }
     private val cachedCurrentPosition = loadCachedCurrentPosition(cachedCurrentFile)
     private val _uiState = MutableStateFlow(
         PlayerUiState(
             musicFile = cachedCurrentFile,
             library = cachedLibrary,
-            queue = cachedCurrentFile?.let { listOf(it) } ?: emptyList(),
+            queue = cachedQueue,
+            currentQueueEntryId = cachedCurrentQueueEntryId,
             playlists = loadPlaylists(),
             favoriteUris = favoriteUris.toSet(),
             positionMs = cachedCurrentPosition,
@@ -95,25 +112,53 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     fun initialize() {
         if (musicPlayer == null) {
             musicPlayer = MusicPlayer(getApplication()) { player ->
+                val previousState = _uiState.value
+                val mediaId = player.currentMediaItem?.mediaId
+                val currentEntry = previousState.queue.firstOrNull { it.id == mediaId }
+                    ?: previousState.queue.firstOrNull { it.file.uri.toString() == mediaId }
+                val current = currentEntry?.file ?: previousState.library.firstOrNull {
+                    it.uri.toString() == mediaId
+                } ?: previousState.musicFile
+                val trackChanged = currentEntry?.id != previousState.currentQueueEntryId ||
+                    current?.uri != previousState.musicFile?.uri
+
                 _uiState.update { state ->
-                    val current = state.queue.firstOrNull {
-                        it.uri.toString() == player.currentMediaItem?.mediaId
-                    } ?: state.library.firstOrNull {
-                        it.uri.toString() == player.currentMediaItem?.mediaId
-                    } ?: state.musicFile
                     state.copy(
                         musicFile = current,
+                        currentQueueEntryId = currentEntry?.id ?: state.currentQueueEntryId,
                         isPlaying = player.isPlaying,
                         positionMs = player.currentPosition,
                         durationMs = player.duration.takeIf { duration -> duration > 0 }
                             ?: current?.durationMs
                             ?: 0L,
+                        lyricsOffsetMs = if (trackChanged && current != null) {
+                            loadLyricsOffset(current)
+                        } else {
+                            state.lyricsOffsetMs
+                        },
                         isFavorite = current?.uri?.toString()?.let { it in favoriteUris } == true,
                         favoriteUris = favoriteUris.toSet()
                     )
                 }
+                if (trackChanged) {
+                    val currentState = _uiState.value
+                    saveQueueCache(currentState.queue, currentState.currentQueueEntryId)
+                    current?.let {
+                        saveCurrentFile(it)
+                        loadLyrics(it)
+                    }
+                }
                 if (player.playbackState == Player.STATE_ENDED) handleTrackEnded()
             }
+
+            val restoredState = _uiState.value
+            musicPlayer?.replaceQueue(
+                queue = restoredState.queue,
+                currentEntryId = restoredState.currentQueueEntryId,
+                positionMs = restoredState.positionMs,
+                playWhenReady = restoredState.isPlaying,
+                shuffleEnabled = restoredState.shuffleEnabled
+            )
 
             positionJob = viewModelScope.launch {
                 while (isActive) {
@@ -138,11 +183,42 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             }.onSuccess { files ->
                 libraryLoaded = true
                 saveLibraryCache(files)
-                _uiState.update { state ->
-                    state.copy(
-                        library = files,
-                        queue = if (state.queue.size <= 1 && state.musicFile != null) files else state.queue,
-                        errorMessage = null
+                val state = _uiState.value
+                val creatingLibraryQueue = state.queue.size <= 1 && state.musicFile != null
+                val nextQueue = if (creatingLibraryQueue) {
+                    val currentEntry = state.queue.firstOrNull { it.id == state.currentQueueEntryId }
+                        ?: QueueEntry.create(state.musicFile)
+                    val fromLibrary = files.map { file ->
+                        if (file.uri == state.musicFile.uri) currentEntry.copy(file = file)
+                        else QueueEntry.create(file)
+                    }
+                    if (fromLibrary.none { it.id == currentEntry.id }) listOf(currentEntry) + fromLibrary else fromLibrary
+                } else {
+                    state.queue.mapNotNull { entry ->
+                        val file = files.firstOrNull { it.uri == entry.file.uri }
+                        when {
+                            file != null -> entry.copy(file = file)
+                            entry.id == state.currentQueueEntryId -> entry
+                            entry.file.uri.authority == "media" -> null
+                            else -> entry
+                        }
+                    }
+                }
+                val activeIndex = nextQueue.indexOfFirst { it.id == state.currentQueueEntryId }
+                val playbackOrder = if (state.shuffleEnabled && creatingLibraryQueue && activeIndex >= 0) {
+                    nextQueue.take(activeIndex + 1) + nextQueue.drop(activeIndex + 1).shuffled()
+                } else {
+                    nextQueue
+                }
+                _uiState.update { it.copy(library = files, queue = playbackOrder, errorMessage = null) }
+                saveQueueCache(playbackOrder, state.currentQueueEntryId)
+                if (playbackOrder.map { it.id } != state.queue.map { it.id }) {
+                    musicPlayer?.replaceQueue(
+                        queue = playbackOrder,
+                        currentEntryId = state.currentQueueEntryId,
+                        positionMs = musicPlayer?.currentPositionOrNull() ?: state.positionMs,
+                        playWhenReady = state.isPlaying,
+                        shuffleEnabled = state.shuffleEnabled
                     )
                 }
             }.onFailure { error ->
@@ -167,7 +243,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                         }
                         state.copy(
                             library = state.library.map(updateFile),
-                            queue = state.queue.map(updateFile),
+                            queue = state.queue.map { it.copy(file = updateFile(it.file)) },
                             musicFile = state.musicFile?.let(updateFile)
                         )
                     }
@@ -186,7 +262,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     }
                     state.copy(
                         library = state.library.map(updateFile),
-                        queue = state.queue.map(updateFile),
+                        queue = state.queue.map { it.copy(file = updateFile(it.file)) },
                         musicFile = state.musicFile?.let(updateFile)
                     )
                 }
@@ -201,7 +277,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     repository.readMetadata(getApplication(), uri)
                 }
             }.onSuccess { musicFile ->
-                playFile(musicFile, listOf(musicFile), false)
+                val entry = QueueEntry.create(musicFile)
+                playFile(entry, listOf(entry), false)
             }.onFailure { error ->
                 _uiState.update {
                     it.copy(errorMessage = error.message ?: "No se pudo abrir el archivo")
@@ -211,30 +288,112 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun playFromLibrary(file: MusicFile) {
-        if (_uiState.value.musicFile?.uri == file.uri) return
-        val queue = _uiState.value.library.ifEmpty { listOf(file) }
-        playSelected(file, queue)
+        val state = _uiState.value
+        if (state.musicFile?.uri == file.uri) return
+        val queue = state.library.ifEmpty { listOf(file) }.map { QueueEntry.create(it) }
+        val selected = queue.firstOrNull { it.file.uri == file.uri } ?: QueueEntry.create(file)
+        val baseQueue = if (selected in queue) queue else queue + selected
+        val selectedIndex = baseQueue.indexOfFirst { it.id == selected.id }
+        val playbackOrder = if (state.shuffleEnabled) {
+            baseQueue.take(selectedIndex + 1) + baseQueue.drop(selectedIndex + 1).shuffled()
+        } else baseQueue
+        playSelected(selected, playbackOrder)
     }
 
-    fun playFromQueue(file: MusicFile) {
-        if (_uiState.value.musicFile?.uri == file.uri) return
-        playSelected(file, _uiState.value.queue)
+    fun playFromQueue(entry: QueueEntry) {
+        if (_uiState.value.currentQueueEntryId == entry.id) return
+        playSelected(entry, _uiState.value.queue)
     }
 
     fun addToQueue(file: MusicFile) {
-        _uiState.update { state ->
-            if (state.queue.any { it.uri == file.uri }) state
-            else state.copy(queue = state.queue + file)
+        val entry = QueueEntry.create(file)
+        val queue = _uiState.value.queue + entry
+        musicPlayer?.addQueueEntry(entry, queue.lastIndex)
+        _uiState.update { it.copy(queue = queue) }
+        saveQueueCache(queue, _uiState.value.currentQueueEntryId)
+    }
+
+    fun moveInQueue(itemId: String, targetId: String?, afterTarget: Boolean) {
+        val state = _uiState.value
+        val from = state.queue.indexOfFirst { it.id == itemId }
+        val currentIndex = state.queue.indexOfFirst { it.id == state.currentQueueEntryId }
+        if (from < 0 || from <= currentIndex) return
+        val remaining = state.queue.toMutableList().apply { removeAt(from) }
+        val anchorIndex = targetId?.let { id -> remaining.indexOfFirst { it.id == id } } ?: -1
+        if (targetId != null && anchorIndex < 0) return
+        val minimumIndex = if (currentIndex >= 0) currentIndex + 1 else 0
+        val destination = (if (targetId == null) remaining.size else anchorIndex + if (afterTarget) 1 else 0)
+            .coerceIn(minimumIndex, remaining.size)
+        val updated = remaining.toMutableList().apply { add(destination, state.queue[from]) }
+        if (destination != from) {
+            musicPlayer?.moveQueueEntry(from, destination)
+            _uiState.update { it.copy(queue = updated) }
+            saveQueueCache(updated, state.currentQueueEntryId)
         }
     }
 
-    fun moveInQueue(itemUri: String, beforeUri: String) {
-        _uiState.update { state ->
-            val item = state.queue.firstOrNull { it.uri.toString() == itemUri } ?: return@update state
-            val remaining = state.queue.filterNot { it.uri.toString() == itemUri }.toMutableList()
-            val target = remaining.indexOfFirst { it.uri.toString() == beforeUri }
-            if (target < 0) state else state.copy(queue = remaining.apply { add(target, item) })
+    fun removeFromQueue(entryId: String) {
+        val state = _uiState.value
+        val index = state.queue.indexOfFirst { it.id == entryId }
+        if (index < 0) return
+        val removingCurrent = state.currentQueueEntryId == entryId
+        val fallback = if (removingCurrent) {
+            state.queue.getOrNull(index + 1)
+                ?: state.queue.getOrNull(index - 1)
+        } else null
+        if (removingCurrent && fallback == null) {
+            musicPlayer?.clearQueue()
+            clearCurrentPlaybackCache()
+            lyricsJob?.cancel()
+            _uiState.update {
+                it.copy(
+                    queue = emptyList(),
+                    currentQueueEntryId = null,
+                    musicFile = null,
+                    isPlaying = false,
+                    positionMs = 0L,
+                    durationMs = 0L,
+                    isFavorite = false,
+                    lyrics = null,
+                    lyricsStatus = LyricsStatus.IDLE,
+                    showTranslatedLyrics = false,
+                    translationLoading = false,
+                    translationError = null
+                )
+            }
+            saveQueueCache(emptyList(), null)
+            return
         }
+        if (removingCurrent) fallback?.let { musicPlayer?.seekToQueueItem(it.id) }
+        musicPlayer?.removeQueueItems(index, index + 1)
+        _uiState.update { current ->
+            current.copy(
+                queue = current.queue.filterNot { it.id == entryId },
+                currentQueueEntryId = if (removingCurrent) fallback?.id else current.currentQueueEntryId,
+                musicFile = if (removingCurrent) fallback?.file else current.musicFile,
+                positionMs = if (removingCurrent) 0L else current.positionMs,
+                durationMs = if (removingCurrent) fallback?.file?.durationMs ?: 0L else current.durationMs,
+                lyrics = if (removingCurrent) null else current.lyrics,
+                lyricsStatus = if (removingCurrent) LyricsStatus.IDLE else current.lyricsStatus
+            )
+        }
+        saveQueueCache(_uiState.value.queue, _uiState.value.currentQueueEntryId)
+        if (removingCurrent) fallback?.file?.let {
+            saveCurrentFile(it)
+            loadLyrics(it)
+        }
+    }
+
+    fun clearPendingQueue() {
+        val state = _uiState.value
+        val currentIndex = state.queue.indexOfFirst { it.id == state.currentQueueEntryId }
+        val firstPending = if (currentIndex >= 0) currentIndex + 1 else 0
+        if (firstPending >= state.queue.size) return
+        musicPlayer?.removeQueueItems(firstPending, state.queue.size)
+        _uiState.update {
+            it.copy(queue = if (currentIndex >= 0) it.queue.take(currentIndex + 1) else emptyList())
+        }
+        saveQueueCache(_uiState.value.queue, _uiState.value.currentQueueEntryId)
     }
 
     private data class DeleteAttempt(val deleted: Boolean, val request: PendingIntent? = null)
@@ -282,34 +441,78 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun removeDeletedSong(file: MusicFile) {
         viewModelScope.launch {
+            val stateBeforeDelete = _uiState.value
             val updatedPlaylists = _uiState.value.playlists.map { playlist ->
                 playlist.copy(songUris = playlist.songUris - file.uri.toString())
             }
             savePlaylists(updatedPlaylists)
             favoriteUris.remove(file.uri.toString())
             preferences.edit().putStringSet("favorite_uris", favoriteUris).apply()
-            val currentWasDeleted = _uiState.value.musicFile?.uri == file.uri
+            val currentWasDeleted = stateBeforeDelete.musicFile?.uri == file.uri
+            val currentIndex = stateBeforeDelete.queue.indexOfFirst { it.id == stateBeforeDelete.currentQueueEntryId }
+            val fallbackEntry = if (currentWasDeleted) {
+                stateBeforeDelete.queue.drop(currentIndex + 1).firstOrNull { it.file.uri != file.uri }
+                    ?: stateBeforeDelete.queue.take(currentIndex.coerceAtLeast(0)).lastOrNull { it.file.uri != file.uri }
+            } else null
             if (currentWasDeleted) musicPlayer?.pause()
+            val removedIndices = stateBeforeDelete.queue.indices
+                .filter { stateBeforeDelete.queue[it].file.uri == file.uri }
+                .sortedDescending()
+            removedIndices.forEach { musicPlayer?.removeQueueItems(it, it + 1) }
+            if (currentWasDeleted) {
+                if (fallbackEntry == null) musicPlayer?.clearQueue()
+                else musicPlayer?.seekToQueueItem(fallbackEntry.id)
+            }
             _uiState.update { state ->
+                val remainingQueue = state.queue.filterNot { it.file.uri == file.uri }
                 state.copy(
                     library = state.library.filterNot { it.uri == file.uri },
-                    queue = state.queue.filterNot { it.uri == file.uri },
-                    musicFile = if (currentWasDeleted) null else state.musicFile,
+                    queue = remainingQueue,
+                    currentQueueEntryId = if (currentWasDeleted) fallbackEntry?.id else state.currentQueueEntryId,
+                    musicFile = if (currentWasDeleted) fallbackEntry?.file else state.musicFile,
+                    isPlaying = if (currentWasDeleted) false else state.isPlaying,
+                    positionMs = if (currentWasDeleted) 0L else state.positionMs,
+                    durationMs = if (currentWasDeleted) fallbackEntry?.file?.durationMs ?: 0L else state.durationMs,
+                    lyrics = if (currentWasDeleted) null else state.lyrics,
+                    lyricsStatus = if (currentWasDeleted) LyricsStatus.IDLE else state.lyricsStatus,
                     favoriteUris = favoriteUris.toSet(),
                     isFavorite = if (currentWasDeleted) false else state.isFavorite,
                     errorMessage = null
                 )
             }
+            saveQueueCache(_uiState.value.queue, _uiState.value.currentQueueEntryId)
+            if (currentWasDeleted) {
+                if (fallbackEntry != null) {
+                    saveCurrentFile(fallbackEntry.file)
+                    loadLyrics(fallbackEntry.file)
+                } else {
+                    clearCurrentPlaybackCache()
+                }
+            }
         }
     }
 
     fun playNext(file: MusicFile) {
-        _uiState.update { state ->
-            val remaining = state.queue.filterNot { it.uri == file.uri }.toMutableList()
-            val currentIndex = remaining.indexOfFirst { it.uri == state.musicFile?.uri }
-            val insertAt = if (currentIndex >= 0) currentIndex + 1 else remaining.size
-            remaining.add(insertAt.coerceAtMost(remaining.size), file)
-            state.copy(queue = remaining)
+        val state = _uiState.value
+        if (state.musicFile?.uri == file.uri) return
+        val currentIndex = state.queue.indexOfFirst { it.id == state.currentQueueEntryId }
+        val insertAt = if (currentIndex >= 0) currentIndex + 1 else state.queue.size
+        val existingIndex = (insertAt until state.queue.size)
+            .firstOrNull { state.queue[it].file.uri == file.uri }
+        if (existingIndex != null) {
+            if (existingIndex == insertAt) return
+            val updated = state.queue.toMutableList().apply {
+                add(insertAt, removeAt(existingIndex))
+            }
+            musicPlayer?.moveQueueEntry(existingIndex, insertAt)
+            _uiState.update { it.copy(queue = updated) }
+            saveQueueCache(updated, state.currentQueueEntryId)
+        } else {
+            val entry = QueueEntry.create(file)
+            val updated = state.queue.toMutableList().apply { add(insertAt, entry) }
+            musicPlayer?.addQueueEntry(entry, insertAt)
+            _uiState.update { it.copy(queue = updated) }
+            saveQueueCache(updated, state.currentQueueEntryId)
         }
     }
 
@@ -366,22 +569,25 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }.getOrDefault(emptyList())
     }
 
-    private fun playSelected(file: MusicFile, queue: List<MusicFile>) {
+    private fun playSelected(entry: QueueEntry, queue: List<QueueEntry>) {
         viewModelScope.launch {
             val detailedFile = runCatching {
-                withContext(Dispatchers.IO) { repository.readMetadata(getApplication(), file.uri) }
-            }.getOrDefault(file)
-            val updatedQueue = queue.map { if (it.uri == detailedFile.uri) detailedFile else it }
-            playFile(detailedFile, updatedQueue, true)
+                withContext(Dispatchers.IO) { repository.readMetadata(getApplication(), entry.file.uri) }
+            }.getOrDefault(entry.file)
+            val detailedEntry = entry.copy(file = detailedFile)
+            val updatedQueue = queue.map { if (it.id == entry.id) detailedEntry else it }
+            playFile(detailedEntry, updatedQueue, true)
         }
     }
 
-    private fun playFile(file: MusicFile, queue: List<MusicFile>, playWhenReady: Boolean) {
+    private fun playFile(entry: QueueEntry, queue: List<QueueEntry>, playWhenReady: Boolean) {
+        val file = entry.file
         saveCurrentFile(file)
         _uiState.update {
             it.copy(
                 musicFile = file,
                 queue = queue,
+                currentQueueEntryId = entry.id,
                 favoriteUris = favoriteUris.toSet(),
                 isPlaying = playWhenReady,
                 positionMs = 0L,
@@ -393,7 +599,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 errorMessage = null
             )
         }
-        musicPlayer?.load(file, queue, playWhenReady, _uiState.value.shuffleEnabled)
+        saveQueueCache(queue, entry.id)
+        musicPlayer?.load(entry, queue, playWhenReady, _uiState.value.shuffleEnabled)
         loadLyrics(file)
     }
 
@@ -512,7 +719,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun adjustLyricsOffset(deltaMs: Long) {
-        val offset = (_uiState.value.lyricsOffsetMs + deltaMs).coerceIn(-5_000L, 5_000L)
+        val offset = (_uiState.value.lyricsOffsetMs + deltaMs).coerceIn(-600_000L, 600_000L)
         val file = _uiState.value.musicFile ?: return
         val offsets = runCatching {
             org.json.JSONObject(preferences.getString("lyrics_offsets", "{}") ?: "{}")
@@ -562,7 +769,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             musicPlayer?.seekTo(0L)
             return
         }
-        val currentIndex = state.queue.indexOfFirst { it.uri == state.musicFile?.uri }
+        val currentIndex = state.queue.indexOfFirst { it.id == state.currentQueueEntryId }
         if (currentIndex > 0) {
             playSelected(state.queue[currentIndex - 1], state.queue)
         } else {
@@ -572,14 +779,17 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun skipNext() {
         val state = _uiState.value
-        val currentIndex = state.queue.indexOfFirst { it.uri == state.musicFile?.uri }
-        val nextIndex = if (state.shuffleEnabled && state.queue.size > 1) {
-            state.queue.indices.filter { it != currentIndex }.random()
-        } else currentIndex + 1
+        val currentIndex = state.queue.indexOfFirst { it.id == state.currentQueueEntryId }
+        val nextIndex = currentIndex + 1
         when {
             nextIndex < state.queue.size -> playSelected(state.queue[nextIndex], state.queue)
             state.repeatMode == RepeatMode.ALL && state.queue.isNotEmpty() -> {
-                playSelected(state.queue.first(), state.queue)
+                if (state.shuffleEnabled && state.queue.size > 1) {
+                    val shuffled = state.queue.shuffled()
+                    playSelected(shuffled.first(), shuffled)
+                } else {
+                    playSelected(state.queue.first(), state.queue)
+                }
             }
         }
     }
@@ -587,16 +797,21 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private fun handleTrackEnded() {
         val state = _uiState.value
         if (state.repeatMode == RepeatMode.ONE && state.musicFile != null) {
-            playSelected(state.musicFile, state.queue)
+            state.queue.firstOrNull { it.id == state.currentQueueEntryId }?.let {
+                playSelected(it, state.queue)
+            }
         } else {
-            val currentIndex = state.queue.indexOfFirst { it.uri == state.musicFile?.uri }
-            val nextIndex = if (state.shuffleEnabled && state.queue.size > 1) {
-                state.queue.indices.filter { it != currentIndex }.random()
-            } else currentIndex + 1
+            val currentIndex = state.queue.indexOfFirst { it.id == state.currentQueueEntryId }
+            val nextIndex = currentIndex + 1
             when {
                 nextIndex < state.queue.size -> playSelected(state.queue[nextIndex], state.queue)
                 state.repeatMode == RepeatMode.ALL && state.queue.isNotEmpty() -> {
-                    playSelected(state.queue.first(), state.queue)
+                    if (state.shuffleEnabled && state.queue.size > 1) {
+                        val shuffled = state.queue.shuffled()
+                        playSelected(shuffled.first(), shuffled)
+                    } else {
+                        playSelected(state.queue.first(), state.queue)
+                    }
                 }
             }
         }
@@ -624,22 +839,39 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun cycleRepeatMode() {
-        _uiState.update {
-            it.copy(
-                repeatMode = when (it.repeatMode) {
-                    RepeatMode.OFF -> RepeatMode.ALL
-                    RepeatMode.ALL -> RepeatMode.ONE
-                    RepeatMode.ONE -> RepeatMode.OFF
-                }
-            )
+        val nextMode = when (_uiState.value.repeatMode) {
+            RepeatMode.OFF -> RepeatMode.ALL
+            RepeatMode.ALL -> RepeatMode.ONE
+            RepeatMode.ONE -> RepeatMode.OFF
         }
+        _uiState.update {
+            it.copy(repeatMode = nextMode)
+        }
+        musicPlayer?.setRepeatOneEnabled(nextMode == RepeatMode.ONE)
     }
 
     fun toggleShuffle() {
-        val enabled = !_uiState.value.shuffleEnabled
+        val state = _uiState.value
+        val enabled = !state.shuffleEnabled
         preferences.edit().putBoolean("shuffle_enabled", enabled).apply()
         musicPlayer?.setShuffleEnabled(enabled)
-        _uiState.update { it.copy(shuffleEnabled = enabled) }
+        val currentIndex = state.queue.indexOfFirst { it.id == state.currentQueueEntryId }
+        val queue = if (enabled) {
+            state.queue.take(currentIndex + 1) + state.queue.drop(currentIndex + 1).shuffled()
+        } else {
+            state.queue
+        }
+        if (enabled && queue.map { it.id } != state.queue.map { it.id }) {
+            musicPlayer?.replaceQueue(
+                queue = queue,
+                currentEntryId = state.currentQueueEntryId,
+                positionMs = musicPlayer?.currentPositionOrNull() ?: state.positionMs,
+                playWhenReady = state.isPlaying,
+                shuffleEnabled = enabled
+            )
+        }
+        _uiState.update { it.copy(shuffleEnabled = enabled, queue = queue) }
+        saveQueueCache(queue, _uiState.value.currentQueueEntryId)
     }
 
     fun setTonearmAnimationEnabled(enabled: Boolean) {
@@ -663,6 +895,28 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         preferences.edit().putString("library_cache", json.toString()).apply()
     }
 
+    private fun saveQueueCache(queue: List<QueueEntry>, currentEntryId: String?) {
+        val json = JSONArray()
+        queue.forEach { entry ->
+            val file = entry.file
+            json.put(JSONArray().apply {
+                put(entry.id)
+                put(file.uri.toString())
+                put(file.title)
+                put(file.artist)
+                put(file.album)
+                put(file.durationMs)
+            })
+        }
+        val editor = preferences.edit().putString("queue_cache", json.toString())
+        if (currentEntryId != null && queue.any { it.id == currentEntryId }) {
+            editor.putString("current_queue_entry_id", currentEntryId)
+        } else {
+            editor.remove("current_queue_entry_id")
+        }
+        editor.apply()
+    }
+
     private fun saveCurrentFile(file: MusicFile) {
         val json = JSONArray().apply {
             put(file.uri.toString())
@@ -672,6 +926,15 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             put(file.durationMs)
         }
         preferences.edit().putString("current_file_cache", json.toString()).apply()
+    }
+
+    private fun clearCurrentPlaybackCache() {
+        preferences.edit()
+            .remove("current_file_cache")
+            .remove("current_position_uri")
+            .remove("current_position_ms")
+            .remove("current_queue_entry_id")
+            .apply()
     }
 
     private fun savePlaybackPosition(positionMs: Long) {
@@ -707,6 +970,32 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                             artwork = null,
                             artworkData = null,
                             durationMs = item.getLong(4)
+                        )
+                    )
+                }
+            }
+        }.getOrDefault(emptyList())
+    }
+
+    private fun loadCachedQueue(): List<QueueEntry> {
+        val cached = preferences.getString("queue_cache", null) ?: return emptyList()
+        return runCatching {
+            val json = JSONArray(cached)
+            buildList(json.length()) {
+                for (index in 0 until json.length()) {
+                    val item = json.getJSONArray(index)
+                    add(
+                        QueueEntry(
+                            id = item.getString(0),
+                            file = MusicFile(
+                                uri = Uri.parse(item.getString(1)),
+                                title = item.getString(2),
+                                artist = item.getString(3),
+                                album = item.getString(4),
+                                artwork = null,
+                                artworkData = null,
+                                durationMs = item.getLong(5)
+                            )
                         )
                     )
                 }
