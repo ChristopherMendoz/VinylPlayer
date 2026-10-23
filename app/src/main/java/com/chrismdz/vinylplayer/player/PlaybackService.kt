@@ -11,7 +11,7 @@ class PlaybackService : MediaSessionService() {
     private var equalizer: Equalizer? = null
     private val equalizerPreferences by lazy { getSharedPreferences("vinylplayer_settings", MODE_PRIVATE) }
     private val equalizerListener = android.content.SharedPreferences.OnSharedPreferenceChangeListener { _, key ->
-        if (key?.startsWith("eq_band_") == true) applyEqualizer()
+        if (key == "eq_enabled" || key?.startsWith("eq_band_") == true) applyEqualizer()
     }
 
     override fun onCreate() {
@@ -20,6 +20,7 @@ class PlaybackService : MediaSessionService() {
         equalizer = runCatching {
             Equalizer(0, player!!.audioSessionId).apply { enabled = true }
         }.getOrNull()
+        equalizerPreferences.edit().putBoolean("eq_supported", equalizer != null).apply()
         equalizerPreferences.registerOnSharedPreferenceChangeListener(equalizerListener)
         applyEqualizer()
         mediaSession = MediaSession.Builder(this, player!!).build()
@@ -27,6 +28,7 @@ class PlaybackService : MediaSessionService() {
 
     private fun applyEqualizer() {
         val effect = equalizer ?: return
+        runCatching { effect.enabled = equalizerPreferences.getBoolean("eq_enabled", true) }
         val bands = effect.numberOfBands.toInt()
         for (index in 0 until bands.coerceAtMost(5)) {
             val value = equalizerPreferences.getInt("eq_band_$index", 0).coerceIn(-1000, 1000)

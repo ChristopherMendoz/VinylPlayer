@@ -1,0 +1,12 @@
+Jaudiotagger Android fork
+Copyright (C) 2015 Paul Taylor
+
+VinylPlayer uses com.github.Adonai:jaudiotagger:2.3.14 to edit audio tags.
+The library is licensed under LGPL-2.1-or-later.
+
+Project source and license notice:
+https://github.com/Kaned1as/jaudiotagger
+https://github.com/Kaned1as/jaudiotagger/blob/master/license.txt
+
+The full LGPL 2.1 license text is available at:
+https://www.gnu.org/licenses/old-licenses/lgpl-2.1.html

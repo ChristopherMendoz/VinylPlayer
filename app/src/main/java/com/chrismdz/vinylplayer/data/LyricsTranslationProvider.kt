@@ -9,20 +9,21 @@ import java.net.HttpURLConnection
 import java.net.URL
 
 class LyricsTranslationProvider {
-    suspend fun translate(lyrics: Lyrics): Lyrics = withContext(Dispatchers.IO) {
-        val translatedSynced = lyrics.syncedText?.let { translateSynced(it) }
+    suspend fun translate(lyrics: Lyrics, targetLanguage: String): Lyrics = withContext(Dispatchers.IO) {
+        val translatedSynced = lyrics.syncedText?.let { translateSynced(it, targetLanguage) }
         val translatedPlain = if (lyrics.syncedText.isNullOrBlank()) {
-            lyrics.text?.let { translateText(it) }
+            lyrics.text?.let { translateText(it, targetLanguage) }
         } else {
             translatedSynced?.lines()?.joinToString("\n") { it.substringAfter(']') }
         }
         lyrics.copy(
             translatedText = translatedPlain?.takeIf { it.isNotBlank() },
-            translatedSyncedText = translatedSynced?.takeIf { it.isNotBlank() }
+            translatedSyncedText = translatedSynced?.takeIf { it.isNotBlank() },
+            translatedLanguage = targetLanguage
         )
     }
 
-    private suspend fun translateSynced(value: String): String {
+    private suspend fun translateSynced(value: String, targetLanguage: String): String {
         val lines = value.lines()
         val result = lines.toMutableList()
         val entries = lines.mapIndexedNotNull { index, line ->
@@ -31,7 +32,7 @@ class LyricsTranslationProvider {
         }
         entries.chunked(8).forEach { batch ->
             val source = batch.joinToString("\n") { it.text }
-            val translated = translateText(source).lines()
+            val translated = translateText(source, targetLanguage).lines()
             batch.forEachIndexed { index, entry ->
                 val text = translated.getOrNull(index)?.trim().orEmpty()
                 if (text.isNotEmpty()) result[entry.index] = "${entry.timestamp} $text"
@@ -40,12 +41,12 @@ class LyricsTranslationProvider {
         return result.joinToString("\n")
     }
 
-    private suspend fun translateText(value: String): String = withContext(Dispatchers.IO) {
+    private suspend fun translateText(value: String, targetLanguage: String): String = withContext(Dispatchers.IO) {
         if (value.isBlank()) return@withContext value
         val endpoint = Uri.parse("https://translate.googleapis.com/translate_a/single").buildUpon()
             .appendQueryParameter("client", "gtx")
             .appendQueryParameter("sl", "en")
-            .appendQueryParameter("tl", "es")
+            .appendQueryParameter("tl", targetLanguage)
             .appendQueryParameter("dt", "t")
             .appendQueryParameter("q", value)
             .build().toString()

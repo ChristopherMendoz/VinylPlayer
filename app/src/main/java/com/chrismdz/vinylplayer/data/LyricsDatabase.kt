@@ -22,6 +22,7 @@ data class LyricsEntity(
     val syncedLyrics: String?,
     val translatedLyrics: String? = null,
     val translatedSyncedLyrics: String? = null,
+    val translationLanguage: String? = null,
     val source: String?,
     val fetchedAt: Long
 )
@@ -35,7 +36,7 @@ interface LyricsDao {
     suspend fun save(lyrics: LyricsEntity)
 }
 
-@Database(entities = [LyricsEntity::class], version = 2, exportSchema = false)
+@Database(entities = [LyricsEntity::class], version = 3, exportSchema = false)
 abstract class VinylDatabase : RoomDatabase() {
     abstract fun lyricsDao(): LyricsDao
 
@@ -47,13 +48,19 @@ abstract class VinylDatabase : RoomDatabase() {
                 context.applicationContext,
                 VinylDatabase::class.java,
                 "vinylplayer.db"
-            ).addMigrations(MIGRATION_1_2).build().also { instance = it }
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3).build().also { instance = it }
         }
 
         private val MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
             override fun migrate(database: androidx.sqlite.db.SupportSQLiteDatabase) {
                 database.execSQL("ALTER TABLE lyrics ADD COLUMN translatedLyrics TEXT")
                 database.execSQL("ALTER TABLE lyrics ADD COLUMN translatedSyncedLyrics TEXT")
+            }
+        }
+
+        private val MIGRATION_2_3 = object : androidx.room.migration.Migration(2, 3) {
+            override fun migrate(database: androidx.sqlite.db.SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE lyrics ADD COLUMN translationLanguage TEXT")
             }
         }
     }

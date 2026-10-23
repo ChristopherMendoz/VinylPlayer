@@ -13,6 +13,7 @@ import com.chrismdz.vinylplayer.data.QueueEntry
 
 class MusicPlayer(
     context: Context,
+    private val resumeOnConnect: Boolean = true,
     private val onStateChanged: (Player) -> Unit
 ) {
     private val controllerFuture = MediaController.Builder(
@@ -54,7 +55,7 @@ class MusicPlayer(
                 if (!queueAlreadyLoaded) {
                     val currentItemMatches = pendingEntry?.file?.uri ==
                         mediaController.currentMediaItem?.localConfiguration?.uri
-                    val shouldResumeExistingItem = currentItemMatches && mediaController.mediaItemCount > 0
+                    val shouldResumeExistingItem = resumeOnConnect && currentItemMatches && mediaController.mediaItemCount > 0
                     pendingEntry?.let {
                         load(
                             it,
@@ -124,6 +125,19 @@ class MusicPlayer(
             player.prepare()
             if (playWhenReady) player.play() else player.pause()
             onStateChanged(player)
+        }
+    }
+
+    fun updateQueueMetadata(queue: List<QueueEntry>) {
+        if (queue.map { it.id } != pendingQueue.map { it.id }) return
+        pendingQueue = queue
+        pendingEntry = queue.firstOrNull { it.id == pendingEntry?.id }
+        controller?.let { player ->
+            queue.forEachIndexed { index, entry ->
+                if (index < player.mediaItemCount && player.getMediaItemAt(index).mediaId == entry.id) {
+                    player.replaceMediaItem(index, toMediaItem(entry))
+                }
+            }
         }
     }
 

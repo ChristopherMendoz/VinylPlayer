@@ -14,12 +14,19 @@ import androidx.media3.common.Player
 import com.chrismdz.vinylplayer.data.MusicFile
 import com.chrismdz.vinylplayer.data.QueueEntry
 import com.chrismdz.vinylplayer.data.MusicRepository
+import com.chrismdz.vinylplayer.data.AudioTagWriter
+import com.chrismdz.vinylplayer.data.NeedsWriteApprovalException
 import com.chrismdz.vinylplayer.data.Playlist
 import com.chrismdz.vinylplayer.data.Lyrics
 import com.chrismdz.vinylplayer.data.LyricsStatus
 import com.chrismdz.vinylplayer.data.RoomLyricsRepository
 import com.chrismdz.vinylplayer.data.VinylDatabase
 import com.chrismdz.vinylplayer.player.MusicPlayer
+import com.chrismdz.vinylplayer.settings.AppSettings
+import com.chrismdz.vinylplayer.settings.LibrarySortOrder
+import com.chrismdz.vinylplayer.settings.QueueAddBehavior
+import com.chrismdz.vinylplayer.settings.RepeatMode
+import com.chrismdz.vinylplayer.settings.SettingsPreferences
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
@@ -32,12 +39,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
 import java.util.concurrent.TimeUnit
-
-enum class RepeatMode {
-    OFF,
-    ALL,
-    ONE
-}
 
 data class PlayerUiState(
     val musicFile: MusicFile? = null,
@@ -56,21 +57,36 @@ data class PlayerUiState(
     val translationLoading: Boolean = false,
     val translationError: String? = null,
     val isFavorite: Boolean = false,
-    val shuffleEnabled: Boolean = false,
-    val repeatMode: RepeatMode = RepeatMode.OFF,
-    val tonearmAnimationEnabled: Boolean = true,
-    val errorMessage: String? = null
-)
+    val appSettings: AppSettings = AppSettings(),
+    val isLibraryLoading: Boolean = false,
+    val lastLibraryScanAt: Long? = null,
+    val errorMessage: String? = null,
+    val songTagErrorMessage: String? = null,
+    val sessionRepeatMode: RepeatMode? = null
+) {
+    val shuffleEnabled: Boolean get() = appSettings.shuffleEnabled
+    val repeatMode: RepeatMode get() = sessionRepeatMode ?: appSettings.repeatMode
+    val tonearmAnimationEnabled: Boolean get() = appSettings.tonearmAnimationEnabled
+}
 
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
+    private data class PendingSongTagEdit(
+        val file: MusicFile,
+        val title: String,
+        val artist: String,
+        val album: String
+    )
+
     private val repository = MusicRepository()
     private val lyricsRepository = RoomLyricsRepository(VinylDatabase.get(application).lyricsDao())
     private val preferences = application.getSharedPreferences("vinylplayer_settings", 0)
+    private val settingsPreferences = SettingsPreferences(application)
+    private val initialSettings = settingsPreferences.load()
     private val favoriteUris = preferences.getStringSet("favorite_uris", emptySet()).orEmpty().toMutableSet()
-    private val cachedLibrary = loadCachedLibrary()
-    private val cachedCurrentFile = loadCachedCurrentFile()
+    private val cachedLibrary = sortLibrary(loadCachedLibrary(), initialSettings.librarySortOrder)
+    private val cachedCurrentFile = if (initialSettings.resumeLastSession) loadCachedCurrentFile() else null
     private val cachedQueue = run {
-        val persisted = loadCachedQueue()
+        val persisted = if (initialSettings.keepQueueBetweenSessions) loadCachedQueue() else emptyList()
         when {
             persisted.isEmpty() -> cachedCurrentFile?.let { listOf(QueueEntry.create(it)) }.orEmpty()
             cachedCurrentFile == null -> persisted
@@ -81,7 +97,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
     private val cachedCurrentQueueEntryId = preferences.getString("current_queue_entry_id", null)
-        ?.takeIf { id -> cachedQueue.any { it.id == id } }
+        ?.takeIf { id -> initialSettings.resumeLastSession && cachedQueue.any { it.id == id } }
         ?: cachedCurrentFile?.let { file -> cachedQueue.firstOrNull { it.file.uri == file.uri }?.id }
     private val cachedCurrentPosition = loadCachedCurrentPosition(cachedCurrentFile)
     private val _uiState = MutableStateFlow(
@@ -93,10 +109,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             playlists = loadPlaylists(),
             favoriteUris = favoriteUris.toSet(),
             positionMs = cachedCurrentPosition,
+            lastLibraryScanAt = preferences.getLong("last_library_scan_at", 0L).takeIf { it > 0L },
             lyricsOffsetMs = loadLyricsOffset(cachedCurrentFile),
             isFavorite = cachedCurrentFile?.uri?.toString()?.let { it in favoriteUris } == true,
-            shuffleEnabled = preferences.getBoolean("shuffle_enabled", false),
-            tonearmAnimationEnabled = preferences.getBoolean("tonearm_animation", true)
+            appSettings = initialSettings
         )
     )
     val uiState: StateFlow<PlayerUiState> = _uiState.asStateFlow()
@@ -108,10 +124,14 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private var sleepTimerJob: Job? = null
     private var libraryLoaded = false
     private val artworkLoads = mutableSetOf<String>()
+    private var pendingSongTagEdit: PendingSongTagEdit? = null
 
     fun initialize() {
         if (musicPlayer == null) {
-            musicPlayer = MusicPlayer(getApplication()) { player ->
+            musicPlayer = MusicPlayer(
+                context = getApplication(),
+                resumeOnConnect = _uiState.value.appSettings.resumeLastSession
+            ) { player ->
                 val previousState = _uiState.value
                 val mediaId = player.currentMediaItem?.mediaId
                 val currentEntry = previousState.queue.firstOrNull { it.id == mediaId }
@@ -159,6 +179,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 playWhenReady = restoredState.isPlaying,
                 shuffleEnabled = restoredState.shuffleEnabled
             )
+            musicPlayer?.setRepeatOneEnabled(restoredState.repeatMode == RepeatMode.ONE)
 
             positionJob = viewModelScope.launch {
                 while (isActive) {
@@ -177,25 +198,28 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun loadLibrary(force: Boolean = false) {
         if (libraryJob?.isActive == true || (libraryLoaded && !force)) return
+        _uiState.update { it.copy(isLibraryLoading = true) }
         libraryJob = viewModelScope.launch {
             runCatching {
                 withContext(Dispatchers.IO) { repository.readLibraryMetadata(getApplication()) }
             }.onSuccess { files ->
+                val sortedFiles = sortLibrary(files, _uiState.value.appSettings.librarySortOrder)
                 libraryLoaded = true
-                saveLibraryCache(files)
+                saveLibraryCache(sortedFiles)
                 val state = _uiState.value
-                val creatingLibraryQueue = state.queue.size <= 1 && state.musicFile != null
+                val creatingLibraryQueue = state.queue.size <= 1 && state.musicFile != null &&
+                    state.sessionRepeatMode == null
                 val nextQueue = if (creatingLibraryQueue) {
                     val currentEntry = state.queue.firstOrNull { it.id == state.currentQueueEntryId }
                         ?: QueueEntry.create(state.musicFile)
-                    val fromLibrary = files.map { file ->
+                    val fromLibrary = sortedFiles.map { file ->
                         if (file.uri == state.musicFile.uri) currentEntry.copy(file = file)
                         else QueueEntry.create(file)
                     }
                     if (fromLibrary.none { it.id == currentEntry.id }) listOf(currentEntry) + fromLibrary else fromLibrary
                 } else {
                     state.queue.mapNotNull { entry ->
-                        val file = files.firstOrNull { it.uri == entry.file.uri }
+                        val file = sortedFiles.firstOrNull { it.uri == entry.file.uri }
                         when {
                             file != null -> entry.copy(file = file)
                             entry.id == state.currentQueueEntryId -> entry
@@ -210,7 +234,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 } else {
                     nextQueue
                 }
-                _uiState.update { it.copy(library = files, queue = playbackOrder, errorMessage = null) }
+                _uiState.update {
+                    it.copy(
+                        library = sortedFiles,
+                        queue = playbackOrder,
+                        isLibraryLoading = false,
+                        lastLibraryScanAt = System.currentTimeMillis(),
+                        errorMessage = null
+                    )
+                }
+                preferences.edit().putLong("last_library_scan_at", _uiState.value.lastLibraryScanAt ?: 0L).apply()
                 saveQueueCache(playbackOrder, state.currentQueueEntryId)
                 if (playbackOrder.map { it.id } != state.queue.map { it.id }) {
                     musicPlayer?.replaceQueue(
@@ -223,7 +256,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }.onFailure { error ->
                 _uiState.update {
-                    it.copy(errorMessage = error.message ?: "No se pudo leer la biblioteca")
+                    it.copy(
+                        isLibraryLoading = false,
+                        errorMessage = error.message ?: "No se pudo leer la biblioteca"
+                    )
                 }
             }
         }
@@ -278,6 +314,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 }
             }.onSuccess { musicFile ->
                 val entry = QueueEntry.create(musicFile)
+                clearAlbumPlaybackMode()
                 playFile(entry, listOf(entry), false)
             }.onFailure { error ->
                 _uiState.update {
@@ -288,8 +325,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun playFromLibrary(file: MusicFile) {
+        val currentState = _uiState.value
+        if (currentState.musicFile?.uri == file.uri && currentState.sessionRepeatMode == null) return
+        clearAlbumPlaybackMode()
         val state = _uiState.value
-        if (state.musicFile?.uri == file.uri) return
         val queue = state.library.ifEmpty { listOf(file) }.map { QueueEntry.create(it) }
         val selected = queue.firstOrNull { it.file.uri == file.uri } ?: QueueEntry.create(file)
         val baseQueue = if (selected in queue) queue else queue + selected
@@ -300,14 +339,46 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         playSelected(selected, playbackOrder)
     }
 
+    fun playAlbum(files: List<MusicFile>, shuffle: Boolean = false) {
+        startAlbumPlayback(files, shuffle, null)
+    }
+
+    fun playAlbumTrack(files: List<MusicFile>, startingFile: MusicFile) {
+        startAlbumPlayback(files, shuffle = false, startingFile = startingFile)
+    }
+
+    private fun startAlbumPlayback(files: List<MusicFile>, shuffle: Boolean, startingFile: MusicFile?) {
+        val entries = files.distinctBy { it.uri }.map(QueueEntry::create)
+        if (entries.isEmpty()) return
+        val ordered = if (shuffle) entries.shuffled() else entries
+        val selected = startingFile?.let { file -> ordered.firstOrNull { it.file.uri == file.uri } }
+            ?: ordered.first()
+        _uiState.update { it.copy(sessionRepeatMode = RepeatMode.ALL) }
+        musicPlayer?.setRepeatOneEnabled(false)
+        playSelected(selected, ordered)
+    }
+
     fun playFromQueue(entry: QueueEntry) {
         if (_uiState.value.currentQueueEntryId == entry.id) return
         playSelected(entry, _uiState.value.queue)
     }
 
+    private fun clearAlbumPlaybackMode() {
+        val state = _uiState.value
+        if (state.sessionRepeatMode == null) return
+        _uiState.update { it.copy(sessionRepeatMode = null) }
+        musicPlayer?.setRepeatOneEnabled(state.appSettings.repeatMode == RepeatMode.ONE)
+    }
+
     fun addToQueue(file: MusicFile) {
+        val state = _uiState.value
+        if (!state.appSettings.allowQueueDuplicates && state.queue.any { it.file.uri == file.uri }) return
+        if (state.appSettings.queueAddBehavior == QueueAddBehavior.PLAY_NEXT) {
+            playNext(file)
+            return
+        }
         val entry = QueueEntry.create(file)
-        val queue = _uiState.value.queue + entry
+        val queue = state.queue + entry
         musicPlayer?.addQueueEntry(entry, queue.lastIndex)
         _uiState.update { it.copy(queue = queue) }
         saveQueueCache(queue, _uiState.value.currentQueueEntryId)
@@ -394,6 +465,103 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             it.copy(queue = if (currentIndex >= 0) it.queue.take(currentIndex + 1) else emptyList())
         }
         saveQueueCache(_uiState.value.queue, _uiState.value.currentQueueEntryId)
+    }
+
+    fun editSongTags(
+        file: MusicFile,
+        title: String,
+        artist: String,
+        album: String,
+        onNeedsConfirmation: (PendingIntent) -> Unit
+    ) {
+        val cleanTitle = title.trim()
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) {
+            _uiState.update { it.copy(songTagErrorMessage = "La edición segura de etiquetas requiere Android 10 o posterior") }
+            return
+        }
+        if (cleanTitle.isEmpty()) {
+            _uiState.update { it.copy(songTagErrorMessage = "El título de la canción no puede estar vacío") }
+            return
+        }
+        val edit = PendingSongTagEdit(file, cleanTitle, artist.trim(), album.trim())
+        _uiState.update { it.copy(songTagErrorMessage = null) }
+        viewModelScope.launch {
+            val supported = withContext(Dispatchers.IO) { AudioTagWriter.supports(getApplication(), file.uri) }
+            if (!supported) {
+                _uiState.update { it.copy(songTagErrorMessage = "Este formato no permite editar etiquetas") }
+                return@launch
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val request = runCatching {
+                    withContext(Dispatchers.IO) {
+                        MediaStore.createWriteRequest(getApplication<Application>().contentResolver, listOf(file.uri))
+                    }
+                }.getOrElse { error ->
+                    _uiState.update { it.copy(songTagErrorMessage = error.message ?: "Android no pudo solicitar permiso de escritura") }
+                    return@launch
+                }
+                pendingSongTagEdit = edit
+                onNeedsConfirmation(request)
+            } else {
+                saveSongTags(edit, onNeedsConfirmation)
+            }
+        }
+    }
+
+    fun completeSongTagWrite(granted: Boolean, onNeedsConfirmation: (PendingIntent) -> Unit = {}) {
+        val edit = pendingSongTagEdit ?: return
+        pendingSongTagEdit = null
+        if (!granted) {
+            _uiState.update { it.copy(songTagErrorMessage = "No se guardaron cambios en la canción") }
+            return
+        }
+        saveSongTags(edit, onNeedsConfirmation)
+    }
+
+    private fun saveSongTags(edit: PendingSongTagEdit, onNeedsConfirmation: (PendingIntent) -> Unit) {
+        _uiState.update { it.copy(songTagErrorMessage = null) }
+        viewModelScope.launch {
+            runCatching {
+                withContext(Dispatchers.IO) {
+                    AudioTagWriter.write(
+                        getApplication(), edit.file.uri, edit.title, edit.artist, edit.album
+                    )
+                    repository.readMetadata(getApplication(), edit.file.uri)
+                }
+            }.onSuccess { indexed ->
+                val updatedFile = indexed.copy(
+                    title = edit.title,
+                    artist = edit.artist,
+                    album = edit.album,
+                    artwork = indexed.artwork ?: edit.file.artwork,
+                    artworkData = indexed.artworkData ?: edit.file.artworkData,
+                    filePath = indexed.filePath ?: edit.file.filePath
+                )
+                val state = _uiState.value
+                val updatedLibrary = state.library.map { if (it.uri == edit.file.uri) updatedFile else it }
+                val updatedQueue = state.queue.map { entry ->
+                    if (entry.file.uri == edit.file.uri) entry.copy(file = updatedFile) else entry
+                }
+                val updatedCurrent = state.musicFile?.let { if (it.uri == edit.file.uri) updatedFile else it }
+                _uiState.update { it.copy(library = updatedLibrary, queue = updatedQueue, musicFile = updatedCurrent, songTagErrorMessage = null) }
+                musicPlayer?.updateQueueMetadata(updatedQueue)
+                saveLibraryCache(updatedLibrary)
+                saveQueueCache(updatedQueue, state.currentQueueEntryId)
+                updatedCurrent?.let(::saveCurrentFile)
+            }.onFailure { error ->
+                if (error is NeedsWriteApprovalException) {
+                    pendingSongTagEdit = edit
+                    onNeedsConfirmation(error.pendingIntent)
+                    return@onFailure
+                }
+                val message = when (error) {
+                    is SecurityException -> "Android no concedió permiso para modificar este archivo"
+                    is UnsupportedOperationException -> error.message ?: "Este formato no permite editar etiquetas"
+                    else -> error.message ?: "No se pudieron guardar las etiquetas"
+                }
+                _uiState.update { it.copy(songTagErrorMessage = message) }
+            }
+        }
     }
 
     private data class DeleteAttempt(val deleted: Boolean, val request: PendingIntent? = null)
@@ -497,9 +665,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         if (state.musicFile?.uri == file.uri) return
         val currentIndex = state.queue.indexOfFirst { it.id == state.currentQueueEntryId }
         val insertAt = if (currentIndex >= 0) currentIndex + 1 else state.queue.size
-        val existingIndex = (insertAt until state.queue.size)
-            .firstOrNull { state.queue[it].file.uri == file.uri }
-        if (existingIndex != null) {
+        val existingIndex = state.queue.indexOfFirst { it.file.uri == file.uri }
+        if (!state.appSettings.allowQueueDuplicates && existingIndex >= 0 && existingIndex < insertAt) return
+        if (existingIndex >= insertAt) {
             if (existingIndex == insertAt) return
             val updated = state.queue.toMutableList().apply {
                 add(insertAt, removeAt(existingIndex))
@@ -668,13 +836,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun toggleLyricsTranslation() {
         val state = _uiState.value
+        if (!state.appSettings.lyricsTranslationEnabled) return
         val file = state.musicFile ?: return
         val lyrics = state.lyrics ?: return
+        val targetLanguage = state.appSettings.translationLanguage
         if (state.showTranslatedLyrics) {
             _uiState.update { it.copy(showTranslatedLyrics = false, translationError = null) }
             return
         }
-        if (!lyrics.translatedText.isNullOrBlank() || !lyrics.translatedSyncedText.isNullOrBlank()) {
+        val hasTranslation = !lyrics.translatedText.isNullOrBlank() || !lyrics.translatedSyncedText.isNullOrBlank()
+        if (hasTranslation && lyrics.translatedLanguage == targetLanguage.code) {
             _uiState.update { it.copy(showTranslatedLyrics = true, translationError = null) }
             return
         }
@@ -685,12 +856,13 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.update { it.copy(translationLoading = true, translationError = null) }
         viewModelScope.launch {
             runCatching {
-                withContext(Dispatchers.IO) { lyricsRepository.translateAndSaveLyrics(file) }
+                withContext(Dispatchers.IO) { lyricsRepository.translateAndSaveLyrics(file, targetLanguage.code) }
             }.onSuccess { translated ->
                 _uiState.updateIfCurrent(file) {
                     it.copy(
                         lyrics = translated,
-                        showTranslatedLyrics = !translated.translatedText.isNullOrBlank() || !translated.translatedSyncedText.isNullOrBlank(),
+                        showTranslatedLyrics = translated.translatedLanguage == targetLanguage.code &&
+                            (!translated.translatedText.isNullOrBlank() || !translated.translatedSyncedText.isNullOrBlank()),
                         translationLoading = false,
                         translationError = if (translated.translatedText.isNullOrBlank() && translated.translatedSyncedText.isNullOrBlank()) "No se pudo traducir esta letra" else null
                     )
@@ -733,20 +905,21 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         musicPlayer?.setSpeed(speed)
     }
 
-    fun startSleepTimer(minutes: Int) {
-        sleepTimerJob?.cancel()
-        if (minutes <= 0) return
-        sleepTimerJob = viewModelScope.launch {
-            delay(minutes * 60_000L)
-            musicPlayer?.pause()
-        }
+    private fun loadLyricsOffset(file: MusicFile?): Long {
+        val globalOffset = preferences.getLong("global_lyrics_offset_ms", 0L).coerceIn(-600_000L, 600_000L)
+        val uri = file?.uri?.toString() ?: return globalOffset
+        return runCatching {
+            val offsets = org.json.JSONObject(preferences.getString("lyrics_offsets", "{}") ?: "{}")
+            if (offsets.has(uri)) offsets.optLong(uri, globalOffset)
+            else globalOffset
+        }.getOrDefault(globalOffset)
     }
 
-    private fun loadLyricsOffset(file: MusicFile?): Long {
-        val uri = file?.uri?.toString() ?: return 0L
+    private fun hasSongLyricsOffset(file: MusicFile?): Boolean {
+        val uri = file?.uri?.toString() ?: return false
         return runCatching {
-            org.json.JSONObject(preferences.getString("lyrics_offsets", "{}") ?: "{}").optLong(uri, 0L)
-        }.getOrDefault(0L)
+            org.json.JSONObject(preferences.getString("lyrics_offsets", "{}") ?: "{}").has(uri)
+        }.getOrDefault(false)
     }
 
     private inline fun MutableStateFlow<PlayerUiState>.updateIfCurrent(
@@ -800,7 +973,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             state.queue.firstOrNull { it.id == state.currentQueueEntryId }?.let {
                 playSelected(it, state.queue)
             }
-        } else {
+        } else if (state.appSettings.autoAdvance || state.repeatMode == RepeatMode.ALL) {
             val currentIndex = state.queue.indexOfFirst { it.id == state.currentQueueEntryId }
             val nextIndex = currentIndex + 1
             when {
@@ -839,44 +1012,130 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun cycleRepeatMode() {
-        val nextMode = when (_uiState.value.repeatMode) {
+        val state = _uiState.value
+        val nextMode = when (state.repeatMode) {
             RepeatMode.OFF -> RepeatMode.ALL
             RepeatMode.ALL -> RepeatMode.ONE
             RepeatMode.ONE -> RepeatMode.OFF
         }
-        _uiState.update {
-            it.copy(repeatMode = nextMode)
+        if (state.sessionRepeatMode != null) {
+            _uiState.update { it.copy(sessionRepeatMode = nextMode) }
+            musicPlayer?.setRepeatOneEnabled(nextMode == RepeatMode.ONE)
+        } else {
+            updateAppSettings { it.copy(repeatMode = nextMode) }
         }
-        musicPlayer?.setRepeatOneEnabled(nextMode == RepeatMode.ONE)
     }
 
     fun toggleShuffle() {
-        val state = _uiState.value
-        val enabled = !state.shuffleEnabled
-        preferences.edit().putBoolean("shuffle_enabled", enabled).apply()
-        musicPlayer?.setShuffleEnabled(enabled)
-        val currentIndex = state.queue.indexOfFirst { it.id == state.currentQueueEntryId }
-        val queue = if (enabled) {
-            state.queue.take(currentIndex + 1) + state.queue.drop(currentIndex + 1).shuffled()
-        } else {
-            state.queue
+        updateAppSettings { it.copy(shuffleEnabled = !it.shuffleEnabled) }
+    }
+
+    fun setTonearmAnimationEnabled(enabled: Boolean) {
+        updateAppSettings { it.copy(tonearmAnimationEnabled = enabled) }
+    }
+
+    fun setRepeatMode(mode: RepeatMode) {
+        val hasSessionMode = _uiState.value.sessionRepeatMode != null
+        updateAppSettings { it.copy(repeatMode = mode) }
+        if (hasSessionMode) {
+            _uiState.update { it.copy(sessionRepeatMode = mode) }
+            musicPlayer?.setRepeatOneEnabled(mode == RepeatMode.ONE)
         }
-        if (enabled && queue.map { it.id } != state.queue.map { it.id }) {
+    }
+
+    fun setShuffleEnabled(enabled: Boolean) {
+        updateAppSettings { it.copy(shuffleEnabled = enabled) }
+    }
+
+    fun updateAppSettings(transform: (AppSettings) -> AppSettings) {
+        val oldSettings = _uiState.value.appSettings
+        val updatedSettings = transform(oldSettings)
+        if (updatedSettings == oldSettings) return
+        settingsPreferences.save(updatedSettings)
+        applyAppSettings(updatedSettings, oldSettings)
+    }
+
+    fun resetAppearanceSettings() {
+        val oldSettings = _uiState.value.appSettings
+        val updated = settingsPreferences.resetAppearance()
+        applyAppSettings(updated, oldSettings)
+    }
+
+    fun resetAllSettings() {
+        val oldSettings = _uiState.value.appSettings
+        val defaults = settingsPreferences.resetAll()
+        applyAppSettings(defaults, oldSettings)
+    }
+
+    private fun applyAppSettings(updated: AppSettings, previous: AppSettings) {
+        val state = _uiState.value
+        var queue = state.queue
+        if (previous.shuffleEnabled != updated.shuffleEnabled) {
+            musicPlayer?.setShuffleEnabled(updated.shuffleEnabled)
+            if (updated.shuffleEnabled && queue.isNotEmpty()) {
+                val currentIndex = queue.indexOfFirst { it.id == state.currentQueueEntryId }
+                queue = queue.take(currentIndex + 1) + queue.drop(currentIndex + 1).shuffled()
+            }
+        }
+        if (queue.map { it.id } != state.queue.map { it.id }) {
             musicPlayer?.replaceQueue(
                 queue = queue,
                 currentEntryId = state.currentQueueEntryId,
                 positionMs = musicPlayer?.currentPositionOrNull() ?: state.positionMs,
                 playWhenReady = state.isPlaying,
-                shuffleEnabled = enabled
+                shuffleEnabled = updated.shuffleEnabled
             )
         }
-        _uiState.update { it.copy(shuffleEnabled = enabled, queue = queue) }
-        saveQueueCache(queue, _uiState.value.currentQueueEntryId)
+        if (previous.repeatMode != updated.repeatMode) {
+            musicPlayer?.setRepeatOneEnabled((state.sessionRepeatMode ?: updated.repeatMode) == RepeatMode.ONE)
+        }
+        val activeLyricsOffset = if (previous.globalLyricsOffsetMs != updated.globalLyricsOffsetMs &&
+            !hasSongLyricsOffset(state.musicFile)
+        ) {
+            updated.globalLyricsOffsetMs
+        } else {
+            state.lyricsOffsetMs
+        }
+        val library = if (previous.librarySortOrder != updated.librarySortOrder) {
+            sortLibrary(state.library, updated.librarySortOrder)
+        } else state.library
+        _uiState.update { it.copy(appSettings = updated, queue = queue, library = library, lyricsOffsetMs = activeLyricsOffset) }
+        if (previous.librarySortOrder != updated.librarySortOrder) saveLibraryCache(library)
+        if (previous.keepQueueBetweenSessions != updated.keepQueueBetweenSessions || queue != state.queue) {
+            saveQueueCache(queue, state.currentQueueEntryId)
+        }
+        if (previous.resumeLastSession != updated.resumeLastSession) {
+            if (updated.resumeLastSession) {
+                state.musicFile?.let(::saveCurrentFile)
+                savePlaybackPosition(state.positionMs)
+            } else {
+                preferences.edit()
+                    .remove("current_file_cache")
+                    .remove("current_position_uri")
+                    .remove("current_position_ms")
+                    .apply()
+            }
+        }
+        if (previous.lyricsTranslationEnabled && !updated.lyricsTranslationEnabled) {
+            _uiState.update { it.copy(showTranslatedLyrics = false) }
+        }
+        if (previous.translationLanguage != updated.translationLanguage) {
+            _uiState.update { it.copy(showTranslatedLyrics = false, translationError = null) }
+        }
     }
 
-    fun setTonearmAnimationEnabled(enabled: Boolean) {
-        preferences.edit().putBoolean("tonearm_animation", enabled).apply()
-        _uiState.update { it.copy(tonearmAnimationEnabled = enabled) }
+    fun startSleepTimer(minutes: Int) {
+        sleepTimerJob?.cancel()
+        if (minutes <= 0) return
+        sleepTimerJob = viewModelScope.launch {
+            delay(minutes * 60_000L)
+            musicPlayer?.pause()
+        }
+    }
+
+    fun cancelSleepTimer() {
+        sleepTimerJob?.cancel()
+        sleepTimerJob = null
     }
 
     private fun saveLibraryCache(files: List<MusicFile>) {
@@ -889,13 +1148,24 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     put(file.artist)
                     put(file.album)
                     put(file.durationMs)
+                    put(file.filePath ?: "")
                 }
             )
         }
         preferences.edit().putString("library_cache", json.toString()).apply()
     }
 
+    private fun sortLibrary(files: List<MusicFile>, order: LibrarySortOrder): List<MusicFile> = when (order) {
+        LibrarySortOrder.TITLE -> files.sortedBy { it.title.lowercase() }
+        LibrarySortOrder.ARTIST -> files.sortedWith(compareBy<MusicFile>({ it.artist.lowercase() }, { it.title.lowercase() }))
+        LibrarySortOrder.ALBUM -> files.sortedWith(compareBy<MusicFile>({ it.album.lowercase() }, { it.title.lowercase() }))
+    }
+
     private fun saveQueueCache(queue: List<QueueEntry>, currentEntryId: String?) {
+        if (!_uiState.value.appSettings.keepQueueBetweenSessions) {
+            preferences.edit().remove("queue_cache").remove("current_queue_entry_id").apply()
+            return
+        }
         val json = JSONArray()
         queue.forEach { entry ->
             val file = entry.file
@@ -906,6 +1176,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 put(file.artist)
                 put(file.album)
                 put(file.durationMs)
+                put(file.filePath ?: "")
             })
         }
         val editor = preferences.edit().putString("queue_cache", json.toString())
@@ -918,12 +1189,17 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun saveCurrentFile(file: MusicFile) {
+        if (!_uiState.value.appSettings.resumeLastSession) {
+            preferences.edit().remove("current_file_cache").apply()
+            return
+        }
         val json = JSONArray().apply {
             put(file.uri.toString())
             put(file.title)
             put(file.artist)
             put(file.album)
             put(file.durationMs)
+            put(file.filePath ?: "")
         }
         preferences.edit().putString("current_file_cache", json.toString()).apply()
     }
@@ -938,6 +1214,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun savePlaybackPosition(positionMs: Long) {
+        if (!_uiState.value.appSettings.resumeLastSession) return
         val uri = _uiState.value.musicFile?.uri?.toString() ?: return
         preferences.edit()
             .putString("current_position_uri", uri)
@@ -969,7 +1246,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                             album = item.getString(3),
                             artwork = null,
                             artworkData = null,
-                            durationMs = item.getLong(4)
+                            durationMs = item.getLong(4),
+                            filePath = item.optString(5).takeIf(String::isNotBlank)
                         )
                     )
                 }
@@ -994,7 +1272,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                                 album = item.getString(4),
                                 artwork = null,
                                 artworkData = null,
-                                durationMs = item.getLong(5)
+                                durationMs = item.getLong(5),
+                                filePath = item.optString(6).takeIf(String::isNotBlank)
                             )
                         )
                     )
@@ -1014,7 +1293,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 album = item.getString(3),
                 artwork = null,
                 artworkData = null,
-                durationMs = item.getLong(4)
+                durationMs = item.getLong(4),
+                filePath = item.optString(5).takeIf(String::isNotBlank)
             )
         }.getOrNull()
     }

@@ -6,6 +6,7 @@ data class Lyrics(
     val syncedText: String?,
     val translatedText: String? = null,
     val translatedSyncedText: String? = null,
+    val translatedLanguage: String? = null,
     val source: String?,
     val fetchedAt: Long,
     val found: Boolean

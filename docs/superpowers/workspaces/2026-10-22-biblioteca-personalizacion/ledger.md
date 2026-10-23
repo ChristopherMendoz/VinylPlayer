@@ -1,0 +1,10 @@
+Pre-flight: tareas comparten interfaces `AppSettings.customAccentArgb`, `PlayerBackground.COVER_COLORS`, `MusicRepository.readFilePath` y `LibrarySearch`; no hay conflictos encontrados en el spec.
+Ruling: continuar en el checkout actual y no crear worktree — contiene modificaciones previas autorizadas que deben preservarse; coste si es incorrecto: aislamiento menor de los cambios.
+Ruling: no crear commits — `.git/index` es de solo lectura en este entorno y `git add` falla al crear `.git/index.lock`; coste si es incorrecto: estos cambios no quedarán versionados hasta que el usuario pueda escribir en Git.
+Ruling: `AudioTagWriter.supports` recibe `Context` y `Uri`, y expone `supportsFileName` puro para pruebas — MediaStore usa IDs numéricos sin extensión en el URI; coste si es incorrecto: un editor podría ocultarse o mostrarse para el formato equivocado.
+Ruling: concentrar las ejecuciones de verificación en una suite al cierre — Gradle no pudo inicializar servicios nativos antes de compilar en el primer intento; coste si es incorrecto: no se observará qué tarea causó un eventual fallo hasta la verificación final.
+Ruling: aceptar escritura segura desde Android 10 y deshabilitar el editor en Android 9 o anterior — Android 10 ofrece autorización recuperable por URI, y 11+ ofrece la solicitud MediaStore moderna; coste si es incorrecto: usuarios de Android 9 y anterior no podrán editar tags desde la app.
+
+Verification: `testDebugUnitTest assembleDebug` passed together with JDK 17; 11 unit tests, 0 failures/errors; debug APK generated at `app/build/outputs/apk/debug/app-debug.apk`; `git diff --check` clean.
+Review: first review found contrast issues for mid-luminance and translucent custom accents plus hex field draft reset; fixed linear sRGB contrast with surface compositing and focus-aware draft state; reviewer confirmed fixes.
+Installation: `adb install -r app/build/outputs/apk/debug/app-debug.apk` returned `Success` on the USB-connected device. Playback/UI behavior was not manually exercised on the phone.

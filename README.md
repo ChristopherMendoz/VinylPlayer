@@ -4,15 +4,21 @@ Reproductor de música local para Android, desarrollado con Kotlin, Jetpack Comp
 
 ## Funciones
 
-- Explora y reproduce archivos de audio del dispositivo.
+- Muestra los formatos de audio que Android reconoce en la biblioteca, excepto los archivos `.opus`; los videos no se incluyen.
 - Muestra título, artista, álbum y carátula cuando esos datos están disponibles.
+- Los álbumes se agrupan por nombre exacto, incluidas las variantes de mayúsculas, y muestran el conteo real de pistas. La portada predeterminada es la del primer track y se puede elegir otra portada del álbum.
+- Los detalles de álbum consolidan los créditos de artistas y usan colores derivados de la portada en el fondo del álbum y del reproductor.
 - Controles de reproducción, progreso, aleatorio y repetición.
 - Fila de reproducción dividida entre la canción actual y las siguientes.
 - Permite reordenar canciones pendientes arrastrándolas, reproducir una a continuación, agregarla al final o quitarla de la fila.
-- La fila y la canción actual se restauran al volver a abrir la app.
+- La fila y la sesión se restauran al volver a abrir la app según las preferencias de continuidad.
 - Busca letras y presenta estados de carga, disponibilidad y conexión.
-- Las letras sincronizadas siguen la canción: la vista comienza desde el inicio para evitar un espacio vacío y centra la línea activa cuando ya hay suficiente contexto anterior.
-- Permite ajustar la sincronización de la letra en ambos sentidos y traducirla cuando hay traducción disponible.
+- Las letras sincronizadas siguen la canción y mantienen centrada la línea activa, con tamaño y contexto ajustables.
+- Permite ajustar la sincronización por canción o usar un desfase global; el ajuste individual tiene prioridad.
+- Traduce letras a español, inglés, francés, alemán, italiano o portugués y conserva el idioma asociado a cada traducción guardada.
+- Centro de configuración con secciones de Apariencia, Reproducción, Biblioteca, Letras, Fila, Audio, Almacenamiento y Acerca de.
+- Configuración persistente para tema, acento, fondo del reproductor, animación del brazo, continuidad, cola, orden de biblioteca, letras y ecualizador.
+- La búsqueda de ajustes filtra categorías y opciones; el restablecimiento conserva la música, favoritos, fila, biblioteca y letras guardadas.
 
 ## Requisitos
 

@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.remember
@@ -96,8 +97,8 @@ fun VinylView(
                     .aspectRatio(1f)
                     .graphicsLayer { rotationZ = rotation.value }
                     .clip(CircleShape)
-                    .border(2.dp, Color.White.copy(alpha = 0.88f), CircleShape)
-                    .background(Color(0xFFE4B45B)),
+                    .border(2.dp, MaterialTheme.colorScheme.onSurface.copy(alpha = 0.88f), CircleShape)
+                    .background(MaterialTheme.colorScheme.primary),
                 contentAlignment = Alignment.Center
             ) {
                 if (artwork != null) {
@@ -170,6 +171,7 @@ private fun Tonearm(progress: Float) {
 
 @Composable
 private fun VinylGrooves(modifier: Modifier = Modifier) {
+    val grooveHighlight = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.82f)
     Canvas(modifier = modifier) {
         val center = Offset(size.width / 2f, size.height / 2f)
         val maxRadius = size.minDimension / 2f
@@ -185,7 +187,7 @@ private fun VinylGrooves(modifier: Modifier = Modifier) {
             )
         }
         drawCircle(
-            color = Color.White.copy(alpha = 0.82f),
+            color = grooveHighlight,
             radius = maxRadius * 0.98f,
             center = center,
             style = androidx.compose.ui.graphics.drawscope.Stroke(width = 4.dp.toPx())

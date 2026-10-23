@@ -10,7 +10,7 @@ interface LyricsProvider {
 interface LyricsRepository {
     suspend fun getLyrics(songId: String): Lyrics?
     suspend fun fetchAndSaveLyrics(song: MusicFile): Lyrics
-    suspend fun translateAndSaveLyrics(song: MusicFile): Lyrics
+    suspend fun translateAndSaveLyrics(song: MusicFile, targetLanguage: String): Lyrics
 }
 
 class RoomLyricsRepository(
@@ -56,12 +56,13 @@ class RoomLyricsRepository(
         )
     }
 
-    override suspend fun translateAndSaveLyrics(song: MusicFile): Lyrics {
+    override suspend fun translateAndSaveLyrics(song: MusicFile, targetLanguage: String): Lyrics {
         val original = getLyrics(song.uri.toString())
             ?: fetchAndSaveLyrics(song)
         if (!original.found) return original
-        if (!original.translatedText.isNullOrBlank() || !original.translatedSyncedText.isNullOrBlank()) return original
-        return save(translator.translate(original))
+        val hasTranslation = !original.translatedText.isNullOrBlank() || !original.translatedSyncedText.isNullOrBlank()
+        if (hasTranslation && original.translatedLanguage == targetLanguage) return original
+        return save(translator.translate(original, targetLanguage))
     }
 
     private suspend fun save(lyrics: Lyrics): Lyrics {
@@ -72,6 +73,7 @@ class RoomLyricsRepository(
                 syncedLyrics = lyrics.syncedText,
                 translatedLyrics = lyrics.translatedText,
                 translatedSyncedLyrics = lyrics.translatedSyncedText,
+                translationLanguage = lyrics.translatedLanguage,
                 source = lyrics.source,
                 fetchedAt = lyrics.fetchedAt
             )
@@ -104,6 +106,7 @@ class RoomLyricsRepository(
         syncedText = syncedLyrics,
         translatedText = translatedLyrics,
         translatedSyncedText = translatedSyncedLyrics,
+        translatedLanguage = translationLanguage,
         source = source,
         fetchedAt = fetchedAt,
         found = !lyrics.isNullOrBlank() || !syncedLyrics.isNullOrBlank()

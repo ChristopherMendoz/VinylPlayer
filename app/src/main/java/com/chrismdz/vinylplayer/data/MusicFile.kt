@@ -10,5 +10,6 @@ data class MusicFile(
     val album: String,
     val artwork: Bitmap?,
     val artworkData: ByteArray?,
-    val durationMs: Long
+    val durationMs: Long,
+    val filePath: String? = null
 )
