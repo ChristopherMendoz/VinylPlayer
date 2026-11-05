@@ -3,6 +3,7 @@ package com.chrismdz.vinylplayer.ui
 import android.app.Application
 import android.app.PendingIntent
 import android.content.Context
+import android.graphics.Bitmap
 import android.net.Uri
 import android.os.Build
 import android.provider.MediaStore
@@ -12,6 +13,12 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import androidx.media3.common.Player
 import com.chrismdz.vinylplayer.data.MusicFile
+import com.chrismdz.vinylplayer.data.ArtistCatalogItem
+import com.chrismdz.vinylplayer.data.ArtistImageRepository
+import com.chrismdz.vinylplayer.data.ArtistLibraryRepository
+import com.chrismdz.vinylplayer.data.ArtistTrackLink
+import com.chrismdz.vinylplayer.data.TheAudioDbArtistImageProvider
+import com.chrismdz.vinylplayer.data.sortArtistCatalog
 import com.chrismdz.vinylplayer.data.QueueEntry
 import com.chrismdz.vinylplayer.data.MusicRepository
 import com.chrismdz.vinylplayer.data.AudioTagWriter
@@ -33,11 +40,14 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 data class PlayerUiState(
@@ -59,6 +69,10 @@ data class PlayerUiState(
     val isFavorite: Boolean = false,
     val appSettings: AppSettings = AppSettings(),
     val isLibraryLoading: Boolean = false,
+    val artistCatalog: List<ArtistCatalogItem> = emptyList(),
+    val artistCatalogLoading: Boolean = true,
+    val artistCatalogErrorMessage: String? = null,
+    val artistImages: Map<String, Bitmap> = emptyMap(),
     val lastLibraryScanAt: Long? = null,
     val errorMessage: String? = null,
     val songTagErrorMessage: String? = null,
@@ -70,6 +84,11 @@ data class PlayerUiState(
 }
 
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
+    private data class LibraryScanResult(
+        val files: List<MusicFile>,
+        val artistSyncError: String?
+    )
+
     private data class PendingSongTagEdit(
         val file: MusicFile,
         val title: String,
@@ -78,7 +97,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     )
 
     private val repository = MusicRepository()
-    private val lyricsRepository = RoomLyricsRepository(VinylDatabase.get(application).lyricsDao())
+    private val database = VinylDatabase.get(application)
+    private val artistLibraryRepository = ArtistLibraryRepository(database.artistDao())
+    private val artistImageRepository = ArtistImageRepository(
+        artistDao = database.artistDao(),
+        provider = com.chrismdz.vinylplayer.BuildConfig.THEAUDIODB_API_KEY
+            .takeIf(String::isNotBlank)
+            ?.let(::TheAudioDbArtistImageProvider),
+        imageDirectory = File(application.filesDir, "artist-images")
+    )
+    private val lyricsRepository = RoomLyricsRepository(database.lyricsDao())
     private val preferences = application.getSharedPreferences("vinylplayer_settings", 0)
     private val settingsPreferences = SettingsPreferences(application)
     private val initialSettings = settingsPreferences.load()
@@ -122,11 +150,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private var libraryJob: Job? = null
     private var lyricsJob: Job? = null
     private var sleepTimerJob: Job? = null
+    private var artistCatalogJob: Job? = null
     private var libraryLoaded = false
+    private var pendingForcedLibraryScan = false
     private val artworkLoads = mutableSetOf<String>()
+    private val artistImageLoads = mutableSetOf<String>()
+    private val artistImageFailureAt = mutableMapOf<String, Long>()
     private var pendingSongTagEdit: PendingSongTagEdit? = null
 
     fun initialize() {
+        observeArtistCatalog()
         if (musicPlayer == null) {
             musicPlayer = MusicPlayer(
                 context = getApplication(),
@@ -197,13 +230,24 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun loadLibrary(force: Boolean = false) {
-        if (libraryJob?.isActive == true || (libraryLoaded && !force)) return
+        observeArtistCatalog()
+        if (libraryJob?.isActive == true) {
+            if (force) pendingForcedLibraryScan = true
+            return
+        }
+        if (libraryLoaded && !force) return
+        if (force) pendingForcedLibraryScan = false
         _uiState.update { it.copy(isLibraryLoading = true) }
-        libraryJob = viewModelScope.launch {
+        val scanJob = viewModelScope.launch {
             runCatching {
-                withContext(Dispatchers.IO) { repository.readLibraryMetadata(getApplication()) }
-            }.onSuccess { files ->
-                val sortedFiles = sortLibrary(files, _uiState.value.appSettings.librarySortOrder)
+                withContext(Dispatchers.IO) {
+                    val files = repository.readLibraryMetadata(getApplication())
+                    val artistSyncError = runCatching { artistLibraryRepository.refresh(files) }
+                        .exceptionOrNull()?.let { it.message ?: "No se pudo actualizar el catálogo" }
+                    LibraryScanResult(files, artistSyncError)
+                }
+            }.onSuccess { result ->
+                val sortedFiles = sortLibrary(result.files, _uiState.value.appSettings.librarySortOrder)
                 libraryLoaded = true
                 saveLibraryCache(sortedFiles)
                 val state = _uiState.value
@@ -240,7 +284,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                         queue = playbackOrder,
                         isLibraryLoading = false,
                         lastLibraryScanAt = System.currentTimeMillis(),
-                        errorMessage = null
+                        errorMessage = null,
+                        artistCatalogErrorMessage = result.artistSyncError?.let {
+                            "No se pudo actualizar el catálogo de artistas"
+                        }
                     )
                 }
                 preferences.edit().putLong("last_library_scan_at", _uiState.value.lastLibraryScanAt ?: 0L).apply()
@@ -260,6 +307,18 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                         isLibraryLoading = false,
                         errorMessage = error.message ?: "No se pudo leer la biblioteca"
                     )
+                }
+            }
+        }
+        libraryJob = scanJob
+        scanJob.invokeOnCompletion {
+            viewModelScope.launch {
+                if (libraryJob === scanJob) {
+                    libraryJob = null
+                    if (pendingForcedLibraryScan) {
+                        pendingForcedLibraryScan = false
+                        loadLibrary(force = true)
+                    }
                 }
             }
         }
@@ -283,6 +342,58 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                             musicFile = state.musicFile?.let(updateFile)
                         )
                     }
+                }
+            }
+        }
+    }
+
+    private fun observeArtistCatalog() {
+        if (artistCatalogJob?.isActive == true) return
+        _uiState.update { it.copy(artistCatalogLoading = true) }
+        artistCatalogJob = viewModelScope.launch {
+            artistLibraryRepository.observeCatalog()
+                .catch { error ->
+                    _uiState.update {
+                        it.copy(
+                            artistCatalogLoading = false,
+                            artistCatalogErrorMessage = error.message ?: "No se pudo cargar el catálogo de artistas"
+                        )
+                    }
+                }
+                .collect { artists ->
+                    _uiState.update {
+                        it.copy(
+                            artistCatalog = sortArtistCatalog(artists),
+                            artistCatalogLoading = false,
+                            artistCatalogErrorMessage = null
+                        )
+                    }
+                }
+        }
+    }
+
+    fun observeArtistTrackLinks(artistId: String): kotlinx.coroutines.flow.Flow<List<ArtistTrackLink>> =
+        artistLibraryRepository.observeTrackLinks(artistId)
+
+    fun loadArtistImage(artist: ArtistCatalogItem) {
+        if (_uiState.value.artistImages.containsKey(artist.artistId) ||
+            artistImageFailureAt[artist.artistId]?.let { System.currentTimeMillis() - it < ARTIST_IMAGE_RETRY_MS } == true ||
+            !artistImageLoads.add(artist.artistId)
+        ) return
+        viewModelScope.launch(Dispatchers.IO) {
+            val image = runCatching { artistImageRepository.loadImage(artist) }.getOrNull()
+            withContext(Dispatchers.Main) {
+                artistImageLoads.remove(artist.artistId)
+                if (image != null) {
+                    artistImageFailureAt.remove(artist.artistId)
+                    _uiState.update { current ->
+                        val images = current.artistImages.toMutableMap()
+                        images[artist.artistId] = image
+                        while (images.size > MAX_CACHED_ARTIST_BITMAPS) images.remove(images.keys.first())
+                        current.copy(artistImages = images)
+                    }
+                } else {
+                    artistImageFailureAt[artist.artistId] = System.currentTimeMillis()
                 }
             }
         }
@@ -543,7 +654,20 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     if (entry.file.uri == edit.file.uri) entry.copy(file = updatedFile) else entry
                 }
                 val updatedCurrent = state.musicFile?.let { if (it.uri == edit.file.uri) updatedFile else it }
-                _uiState.update { it.copy(library = updatedLibrary, queue = updatedQueue, musicFile = updatedCurrent, songTagErrorMessage = null) }
+                val artistSyncError = runCatching {
+                    withContext(Dispatchers.IO) { artistLibraryRepository.refresh(updatedLibrary) }
+                }.exceptionOrNull()
+                _uiState.update {
+                    it.copy(
+                        library = updatedLibrary,
+                        queue = updatedQueue,
+                        musicFile = updatedCurrent,
+                        songTagErrorMessage = null,
+                        artistCatalogErrorMessage = artistSyncError?.let {
+                            "No se pudo actualizar el catálogo de artistas"
+                        }
+                    )
+                }
                 musicPlayer?.updateQueueMetadata(updatedQueue)
                 saveLibraryCache(updatedLibrary)
                 saveQueueCache(updatedQueue, state.currentQueueEntryId)
@@ -647,6 +771,14 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     isFavorite = if (currentWasDeleted) false else state.isFavorite,
                     errorMessage = null
                 )
+            }
+            val artistSyncError = runCatching {
+                withContext(Dispatchers.IO) { artistLibraryRepository.refresh(_uiState.value.library) }
+            }.exceptionOrNull()
+            if (artistSyncError != null) {
+                _uiState.update {
+                    it.copy(artistCatalogErrorMessage = "No se pudo actualizar el catálogo de artistas")
+                }
             }
             saveQueueCache(_uiState.value.queue, _uiState.value.currentQueueEntryId)
             if (currentWasDeleted) {
@@ -1321,5 +1453,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     companion object {
         private val LYRICS_CACHE_DURATION_MS = TimeUnit.DAYS.toMillis(7)
+        private val ARTIST_IMAGE_RETRY_MS = TimeUnit.MINUTES.toMillis(2)
+        private const val MAX_CACHED_ARTIST_BITMAPS = 40
     }
 }

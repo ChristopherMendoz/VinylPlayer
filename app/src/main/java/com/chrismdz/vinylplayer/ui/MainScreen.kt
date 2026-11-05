@@ -109,12 +109,14 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalUriHandler
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.flow.collect
+import kotlinx.coroutines.flow.flowOf
 import kotlinx.coroutines.delay
 import kotlin.math.abs
 import kotlin.math.roundToInt
@@ -126,6 +128,10 @@ import com.chrismdz.vinylplayer.data.QueueEntry
 import com.chrismdz.vinylplayer.data.parseSyncedLyrics
 import com.chrismdz.vinylplayer.data.Playlist
 import com.chrismdz.vinylplayer.data.MusicFile
+import com.chrismdz.vinylplayer.data.ArtistCatalogItem
+import com.chrismdz.vinylplayer.data.ArtistTrackLink
+import com.chrismdz.vinylplayer.data.filterArtistCatalog
+import com.chrismdz.vinylplayer.data.sortArtistCatalog
 import com.chrismdz.vinylplayer.data.consolidateAlbumArtists
 import com.chrismdz.vinylplayer.settings.RepeatMode
 import com.chrismdz.vinylplayer.settings.PlayerBackground
@@ -134,6 +140,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 
 private enum class MainView {
     LIBRARY,
@@ -167,7 +174,7 @@ fun MainScreen(viewModel: PlayerViewModel, onRequestAudioPermission: () -> Unit 
     var libraryTabName by rememberSaveable { mutableStateOf(LibraryTab.TRACKS.name) }
     var selectedPlaylistName by rememberSaveable { mutableStateOf<String?>(null) }
     var selectedAlbumName by rememberSaveable { mutableStateOf<String?>(null) }
-    var selectedArtistName by rememberSaveable { mutableStateOf<String?>(null) }
+    var selectedArtistId by rememberSaveable { mutableStateOf<String?>(null) }
     var showPlayerMenu by remember { mutableStateOf(false) }
     var menuFile by remember { mutableStateOf<MusicFile?>(null) }
     var pendingDeleteFile by remember { mutableStateOf<MusicFile?>(null) }
@@ -236,6 +243,10 @@ fun MainScreen(viewModel: PlayerViewModel, onRequestAudioPermission: () -> Unit 
             ?: state.musicFile?.takeIf { it.uri == target.uri }
             ?: target
     }
+    val artistTrackLinksFlow = remember(selectedArtistId) {
+        selectedArtistId?.let(viewModel::observeArtistTrackLinks) ?: flowOf(emptyList<ArtistTrackLink>())
+    }
+    val artistTrackLinks by artistTrackLinksFlow.collectAsStateWithLifecycle(initialValue = emptyList())
 
     LaunchedEffect(Unit) { viewModel.initialize() }
     LaunchedEffect(infoTarget?.uri) {
@@ -355,16 +366,17 @@ fun MainScreen(viewModel: PlayerViewModel, onRequestAudioPermission: () -> Unit 
                             selectedAlbumArtworkOverrideUri = file?.uri?.toString()
                         }
                     },
-                    selectedArtistName = selectedArtistName,
+                    selectedArtistId = selectedArtistId,
+                    artistTrackLinks = artistTrackLinks,
                     onTabChange = {
                         libraryTabName = it.name
                         selectedPlaylistName = null
                         selectedAlbumName = null
-                        selectedArtistName = null
+                        selectedArtistId = null
                     },
                     onPlaylistSelected = { selectedPlaylistName = it },
                     onAlbumSelected = { selectedAlbumName = it },
-                    onArtistSelected = { selectedArtistName = it },
+                    onArtistSelected = { selectedArtistId = it },
                     onCreatePlaylist = viewModel::createPlaylist,
                     onRemoveFromPlaylist = viewModel::removeFromPlaylist,
                     onDeletePlaylist = viewModel::deletePlaylist,
@@ -378,6 +390,7 @@ fun MainScreen(viewModel: PlayerViewModel, onRequestAudioPermission: () -> Unit 
                     artistGridState = artistGridState,
                     onRefresh = { viewModel.loadLibrary(force = true) },
                     onRequestArtwork = viewModel::loadArtwork,
+                    onRequestArtistImage = viewModel::loadArtistImage,
                     onOpenFile = {
                         viewModel.playFromLibrary(it)
                         currentView = MainView.PLAYER
@@ -628,7 +641,8 @@ private fun LibraryView(
     albumArtworkPreferences: android.content.SharedPreferences,
     albumArtworkOverrideUri: String?,
     onChooseAlbumCover: (MusicFile?) -> Unit,
-    selectedArtistName: String?,
+    selectedArtistId: String?,
+    artistTrackLinks: List<ArtistTrackLink>,
     onTabChange: (LibraryTab) -> Unit,
     onPlaylistSelected: (String?) -> Unit,
     onAlbumSelected: (String?) -> Unit,
@@ -644,6 +658,7 @@ private fun LibraryView(
     albumDetailListState: LazyListState,
     onRefresh: () -> Unit,
     onRequestArtwork: (com.chrismdz.vinylplayer.data.MusicFile) -> Unit,
+    onRequestArtistImage: (ArtistCatalogItem) -> Unit,
     albumGridState: androidx.compose.foundation.lazy.grid.LazyGridState,
     artistGridState: androidx.compose.foundation.lazy.grid.LazyGridState,
     onOpenFile: (com.chrismdz.vinylplayer.data.MusicFile) -> Unit,
@@ -670,7 +685,16 @@ private fun LibraryView(
             album = MusicFile::album
         ))
     }
-    val artists = remember(filteredLibrary) { filteredLibrary.groupBy { it.artist }.toSortedMap(String.CASE_INSENSITIVE_ORDER) }
+    val artists = remember(state.artistCatalog, searchQuery) {
+        sortArtistCatalog(filterArtistCatalog(state.artistCatalog, searchQuery))
+    }
+    val selectedArtist = remember(state.artistCatalog, selectedArtistId) {
+        state.artistCatalog.firstOrNull { it.artistId == selectedArtistId }
+    }
+    val artistSongIds = remember(artistTrackLinks) { artistTrackLinks.mapTo(hashSetOf()) { it.songId } }
+    val selectedArtistFiles = remember(state.library, artistSongIds) {
+        state.library.filter { it.uri.toString() in artistSongIds }
+    }
     var showCreatePlaylist by remember { mutableStateOf(false) }
     var playlistName by rememberSaveable { mutableStateOf("") }
     val visiblePlaylists = remember(state.playlists, searchQuery) { filterPlaylists(state.playlists, searchQuery) }
@@ -694,7 +718,7 @@ private fun LibraryView(
         )
     }
     val totalAlbums = remember(state.library) { state.library.map { it.album }.distinct().size }
-    val totalArtists = remember(state.library) { state.library.map { it.artist }.distinct().size }
+    val totalArtists = state.artistCatalog.size
     val totalPlaylistCount = state.playlists.size + 1
     val (resultCount, totalCount, countUnit) = when (tab) {
         LibraryTab.TRACKS -> Triple(filteredLibrary.size, state.library.size, "canciones")
@@ -702,9 +726,8 @@ private fun LibraryView(
             val albumFiles = state.library.filter { it.album == selectedAlbumName }
             Triple(albumFiles.size, albumFiles.size, "canciones del álbum")
         } else Triple(albums.size, totalAlbums, "álbumes")
-        LibraryTab.ARTISTS -> if (selectedArtistName != null) {
-            val artistFiles = state.library.filter { it.artist == selectedArtistName }
-            Triple(artists[selectedArtistName]?.size ?: 0, artistFiles.size, "canciones del artista")
+        LibraryTab.ARTISTS -> if (selectedArtistId != null) {
+            Triple(selectedArtistFiles.size, selectedArtist?.songCount ?: selectedArtistFiles.size, "canciones del artista")
         } else Triple(artists.size, totalArtists, "artistas")
         LibraryTab.PLAYLISTS -> if (selectedPlaylistName != null) {
             val fullPlaylistCount = playlistSongs(state.library, selectedPlaylist, "", { it.uri.toString() }, MusicFile::title, MusicFile::artist, MusicFile::album).size
@@ -714,17 +737,17 @@ private fun LibraryView(
     val hasVisibleContent = when (tab) {
         LibraryTab.TRACKS -> filteredLibrary.isNotEmpty()
         LibraryTab.ALBUMS -> if (selectedAlbumName == null) albums.isNotEmpty() else selectedAlbumFiles.isNotEmpty()
-        LibraryTab.ARTISTS -> if (selectedArtistName == null) artists.isNotEmpty() else artists[selectedArtistName]?.isNotEmpty() == true
+        LibraryTab.ARTISTS -> if (selectedArtistId == null) artists.isNotEmpty() else selectedArtistFiles.isNotEmpty()
         LibraryTab.PLAYLISTS -> if (selectedPlaylistName != null) visiblePlaylistSongs.isNotEmpty() else showFavorites || visiblePlaylists.isNotEmpty()
     }
     val alphabetItems = when {
         tab == LibraryTab.ALBUMS && selectedAlbumName == null -> albums.keys.toList()
-        tab == LibraryTab.ARTISTS && selectedArtistName == null -> artists.keys.toList()
+        tab == LibraryTab.ARTISTS && selectedArtistId == null -> artists.map { it.name }
         tab == LibraryTab.PLAYLISTS && selectedPlaylistName == null -> (if (showFavorites) listOf("Favoritos") else emptyList()) + visiblePlaylists.map { it.name }
         else -> filteredLibrary.map { it.title }
     }
     var alphabetTarget by remember { mutableStateOf(-1) }
-    LaunchedEffect(alphabetTarget, tab, selectedAlbumName, selectedArtistName, selectedPlaylistName) {
+    LaunchedEffect(alphabetTarget, tab, selectedAlbumName, selectedArtistId, selectedPlaylistName) {
         if (alphabetTarget >= 0) {
             when (tab) {
                 LibraryTab.ALBUMS -> albumGridState.scrollToItem(alphabetTarget)
@@ -744,7 +767,7 @@ private fun LibraryView(
                 LibraryTab.TRACKS -> "Buscar canción, artista o álbum"
                 LibraryTab.ALBUMS -> "Buscar álbum, artista o canción"
                 LibraryTab.PLAYLISTS -> if (selectedPlaylistName == null) "Buscar playlist" else "Buscar canción en playlist"
-                LibraryTab.ARTISTS -> "Buscar artista o canción"
+                LibraryTab.ARTISTS -> "Buscar artista"
             }) },
             leadingIcon = { Icon(Icons.Default.Search, null) },
             trailingIcon = {
@@ -783,9 +806,33 @@ private fun LibraryView(
             )
             TextButton(onClick = onRefresh) { Text("Actualizar") }
         }
+        if (tab == LibraryTab.ARTISTS && state.artistCatalogErrorMessage != null) {
+            Text(
+                "No se pudo actualizar el catálogo de artistas. Toca Actualizar para reintentar.",
+                color = MaterialTheme.colorScheme.error,
+                fontSize = 12.sp
+            )
+        }
         }
 
-        if (!hasVisibleContent) {
+        if (tab == LibraryTab.ARTISTS && state.artistCatalog.isEmpty() &&
+            (state.artistCatalogLoading || state.isLibraryLoading)
+        ) {
+            Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
+            }
+        } else if (tab == LibraryTab.ARTISTS && state.artistCatalog.isEmpty() &&
+            state.artistCatalogErrorMessage != null
+        ) {
+            Column(
+                Modifier.fillMaxSize(),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text("No se pudo cargar el catálogo de artistas", color = MaterialTheme.colorScheme.onSurface)
+                TextButton(onClick = onRefresh) { Text("Reintentar") }
+            }
+        } else if (!hasVisibleContent) {
             Column(
                 modifier = Modifier.fillMaxSize(),
                 horizontalAlignment = Alignment.CenterHorizontally,
@@ -798,7 +845,7 @@ private fun LibraryView(
                         LibraryTab.TRACKS -> "No hay canciones disponibles"
                         LibraryTab.ALBUMS -> "No hay álbumes disponibles"
                         LibraryTab.PLAYLISTS -> if (selectedPlaylistName == null) "No hay playlists guardadas" else "Esta playlist está vacía"
-                        LibraryTab.ARTISTS -> "No hay artistas disponibles"
+                        LibraryTab.ARTISTS -> if (selectedArtistId == null) "No hay artistas disponibles" else "No hay canciones para este artista"
                     } else "No se encontraron resultados",
                     color = MaterialTheme.colorScheme.onSurface,
                     fontSize = 20.sp,
@@ -851,26 +898,29 @@ private fun LibraryView(
                             onMore = onMore
                         )
                     }
-                    LibraryTab.ARTISTS -> if (selectedArtistName == null) {
+                    LibraryTab.ARTISTS -> if (selectedArtistId == null) {
                         ArtistGrid(
-                            groups = artists,
+                            artists = artists,
+                            images = state.artistImages,
                             gridState = artistGridState,
-                            onRequestArtwork = onRequestArtwork,
-                            onSelect = onArtistSelected
+                            onRequestArtistImage = onRequestArtistImage,
+                            onSelect = { onArtistSelected(it.artistId) }
                         )
                     } else {
-                        Column(Modifier.fillMaxSize()) {
-                            TextButton(onClick = { onArtistSelected(null) }) { Text("‹ Artistas") }
-                            GroupedSongList(
-                                groups = artists.filterKeys { it == selectedArtistName },
-                                listState = listState,
-                                state = state,
-                                onRequestArtwork = onRequestArtwork,
-                                onOpenFile = onOpenFile,
-                                onMore = onMore,
-                                onAddToPlaylist = onAddToPlaylist
-                            )
-                        }
+                        ArtistDetailContent(
+                            artist = selectedArtist,
+                            tracks = selectedArtistFiles,
+                            links = artistTrackLinks,
+                            image = selectedArtist?.let { state.artistImages[it.artistId] },
+                            listState = listState,
+                            state = state,
+                            onBack = { onArtistSelected(null) },
+                            onRequestImage = onRequestArtistImage,
+                            onRequestArtwork = onRequestArtwork,
+                            onOpenFile = onOpenFile,
+                            onMore = onMore,
+                            onAddToPlaylist = onAddToPlaylist
+                        )
                     }
                     LibraryTab.PLAYLISTS -> {
                         if (selectedPlaylistName == null) {
@@ -927,7 +977,7 @@ private fun LibraryView(
                 }
                 if (alphabetItems.isNotEmpty() && !(tab == LibraryTab.PLAYLISTS && selectedPlaylistName != null) &&
                     !(tab == LibraryTab.ALBUMS && selectedAlbumName != null) &&
-                    !(tab == LibraryTab.ARTISTS && selectedArtistName != null)) {
+                    !(tab == LibraryTab.ARTISTS && selectedArtistId != null)) {
                     AlphabetIndex(Modifier.align(Alignment.CenterEnd).padding(end = 2.dp)) { letter ->
                         val index = indexForLetter(alphabetItems, letter)
                         if (index >= 0) alphabetTarget = index
@@ -1319,10 +1369,11 @@ private fun AlbumTrackRow(
 
 @Composable
 private fun ArtistGrid(
-    groups: Map<String, List<com.chrismdz.vinylplayer.data.MusicFile>>,
+    artists: List<ArtistCatalogItem>,
+    images: Map<String, android.graphics.Bitmap>,
     gridState: androidx.compose.foundation.lazy.grid.LazyGridState,
-    onRequestArtwork: (com.chrismdz.vinylplayer.data.MusicFile) -> Unit,
-    onSelect: (String) -> Unit
+    onRequestArtistImage: (ArtistCatalogItem) -> Unit,
+    onSelect: (ArtistCatalogItem) -> Unit
 ) {
     LazyVerticalGrid(
         columns = GridCells.Fixed(2),
@@ -1332,24 +1383,130 @@ private fun ArtistGrid(
         horizontalArrangement = Arrangement.spacedBy(12.dp),
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
-        gridItems(groups.entries.toList(), key = { it.key }) { entry ->
-            val cover = entry.value.firstOrNull()
-            LaunchedEffect(cover?.uri, cover?.artwork) {
-                if (cover != null && cover.artwork == null) onRequestArtwork(cover)
-            }
+        gridItems(artists, key = { it.artistId }) { artist ->
+            LaunchedEffect(artist.artistId) { onRequestArtistImage(artist) }
             Card(
-                modifier = Modifier.fillMaxWidth().clickable { onSelect(entry.key) },
+                modifier = Modifier.fillMaxWidth().clickable { onSelect(artist) },
                 shape = RoundedCornerShape(16.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.34f))
             ) {
                 Box(contentAlignment = Alignment.Center, modifier = Modifier.fillMaxWidth().padding(top = 12.dp)) {
-                    ArtworkTile(cover, Modifier.size(108.dp).clip(CircleShape))
+                    ArtistImageTile(images[artist.artistId], Modifier.size(108.dp).clip(CircleShape), artist.name)
                 }
                 Column(Modifier.padding(10.dp)) {
-                    Text(entry.key, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.SemiBold, maxLines = 1, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
-                    Text("${entry.value.size} pistas", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.58f), fontSize = 12.sp, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+                    Text(artist.name, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.SemiBold, maxLines = 1, textAlign = TextAlign.Center, modifier = Modifier.fillMaxWidth())
+                    Text(
+                        if (artist.songCount == 1) "1 canción" else "${artist.songCount} canciones",
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.58f),
+                        fontSize = 12.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier.fillMaxWidth()
+                    )
                 }
             }
+        }
+    }
+}
+
+@Composable
+private fun ArtistImageTile(image: android.graphics.Bitmap?, modifier: Modifier, artistName: String) {
+    if (image != null) {
+        Image(image.asImageBitmap(), "Imagen de $artistName", modifier, contentScale = ContentScale.Crop)
+    } else {
+        Box(
+            modifier.background(MaterialTheme.colorScheme.surfaceVariant),
+            contentAlignment = Alignment.Center
+        ) {
+            Icon(Icons.Default.MusicNote, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(38.dp))
+        }
+    }
+}
+
+@Composable
+private fun ArtistDetailContent(
+    artist: ArtistCatalogItem?,
+    tracks: List<MusicFile>,
+    links: List<ArtistTrackLink>,
+    image: android.graphics.Bitmap?,
+    listState: LazyListState,
+    state: PlayerUiState,
+    onBack: () -> Unit,
+    onRequestImage: (ArtistCatalogItem) -> Unit,
+    onRequestArtwork: (MusicFile) -> Unit,
+    onOpenFile: (MusicFile) -> Unit,
+    onMore: (MusicFile) -> Unit,
+    onAddToPlaylist: (MusicFile) -> Unit
+) {
+    val uriHandler = LocalUriHandler.current
+    val linksBySongId = remember(links) { links.associateBy { it.songId } }
+    LaunchedEffect(artist?.artistId) { artist?.let(onRequestImage) }
+    LazyColumn(
+        state = listState,
+        modifier = Modifier.fillMaxSize(),
+        contentPadding = PaddingValues(bottom = 16.dp),
+        verticalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        item(key = "artist-detail-header-${artist?.artistId}") {
+            Column(Modifier.fillMaxWidth(), horizontalAlignment = Alignment.CenterHorizontally) {
+                Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
+                    TextButton(onClick = onBack) { Text("‹ Artistas") }
+                }
+                artist?.let { selected ->
+                    ArtistImageTile(image, Modifier.size(148.dp).clip(CircleShape), selected.name)
+                    Spacer(Modifier.height(14.dp))
+                    Text(
+                        selected.name,
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontSize = 25.sp,
+                        fontWeight = FontWeight.Bold,
+                        textAlign = TextAlign.Center,
+                        maxLines = 2
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        if (selected.songCount == 1) "1 canción" else "${selected.songCount} canciones",
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.68f),
+                        fontSize = 14.sp
+                    )
+                    val primaryCount = links.count { it.role == "PRIMARY" }
+                    val featuredCount = links.size - primaryCount
+                    Text(
+                        "$primaryCount principales · $featuredCount colaboraciones",
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.58f),
+                        fontSize = 12.sp,
+                        modifier = Modifier.padding(top = 3.dp)
+                    )
+                    if (image != null) {
+                        Text(
+                            "Imagen: TheAudioDB",
+                            color = MaterialTheme.colorScheme.primary,
+                            fontSize = 11.sp,
+                            modifier = Modifier.clickable {
+                                runCatching { uriHandler.openUri("https://www.theaudiodb.com/") }
+                            }.padding(top = 5.dp)
+                        )
+                    }
+                }
+                Spacer(Modifier.height(12.dp))
+            }
+        }
+        items(tracks, key = { it.uri.toString() }) { file ->
+            MusicRow(
+                file = file,
+                isCurrent = file.uri == state.musicFile?.uri,
+                isFavorite = file.uri.toString() in state.favoriteUris,
+                onRequestArtwork = onRequestArtwork,
+                onClick = { onOpenFile(file) },
+                onMore = { onMore(file) },
+                onAddToPlaylist = { onAddToPlaylist(file) }
+            )
+            val role = linksBySongId[file.uri.toString()]?.role
+            Text(
+                if (role == "PRIMARY") "Artista principal" else "Colaborador",
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.52f),
+                fontSize = 11.sp,
+                modifier = Modifier.padding(start = 16.dp, top = 1.dp, bottom = 2.dp)
+            )
         }
     }
 }
@@ -1373,40 +1530,6 @@ private fun indexForLetter(items: List<String>, letter: Char): Int {
         items.indexOfFirst { it.trim().firstOrNull()?.isLetter() != true }
     } else {
         items.indexOfFirst { it.trim().firstOrNull()?.uppercaseChar() == letter }
-    }
-}
-
-@Composable
-private fun GroupedSongList(
-    groups: Map<String, List<com.chrismdz.vinylplayer.data.MusicFile>>,
-    listState: LazyListState,
-    state: PlayerUiState,
-    onRequestArtwork: (com.chrismdz.vinylplayer.data.MusicFile) -> Unit,
-    onOpenFile: (com.chrismdz.vinylplayer.data.MusicFile) -> Unit,
-    onMore: (com.chrismdz.vinylplayer.data.MusicFile) -> Unit,
-    onAddToPlaylist: (com.chrismdz.vinylplayer.data.MusicFile) -> Unit
-) {
-    LazyColumn(
-        state = listState,
-        modifier = Modifier.fillMaxSize(),
-        verticalArrangement = Arrangement.spacedBy(8.dp)
-    ) {
-        groups.forEach { (name, files) ->
-            item(key = "header-$name") {
-                Text(name, color = MaterialTheme.colorScheme.primary, fontSize = 16.sp, fontWeight = FontWeight.Bold, modifier = Modifier.padding(top = 8.dp))
-            }
-            items(files, key = { it.uri.toString() }) { file ->
-                MusicRow(
-                    file = file,
-                    isCurrent = file.uri == state.musicFile?.uri,
-                    isFavorite = file.uri.toString() in state.favoriteUris,
-                    onRequestArtwork = onRequestArtwork,
-                    onClick = { onOpenFile(file) },
-                    onMore = { onMore(file) },
-                    onAddToPlaylist = { onAddToPlaylist(file) }
-                )
-            }
-        }
     }
 }
 

@@ -1,10 +1,5 @@
 package com.chrismdz.vinylplayer.data
 
-import java.text.Normalizer
-import java.util.Locale
-
-private const val UNKNOWN_ARTIST_LABEL = "artista desconocido"
-
 data class AlbumArtistCredits(
     val primaryArtist: String?,
     val participants: List<String>,
@@ -50,34 +45,7 @@ fun consolidateAlbumArtists(trackArtists: List<String?>): AlbumArtistCredits {
 }
 
 private fun parseArtists(metadata: String?): List<String> {
-    val seen = linkedSetOf<String>()
-    return metadata.orEmpty()
-        .split(',')
-        .mapNotNull { rawName ->
-            val displayName = cleanArtistName(rawName)
-            if (displayName.isEmpty()) return@mapNotNull null
-
-            val key = artistKey(displayName)
-            if (key == UNKNOWN_ARTIST_LABEL) return@mapNotNull null
-            if (seen.add(key)) displayName else null
-        }
+    return parseArtistCredits(metadata).map(ArtistCredit::name)
 }
 
-private fun cleanArtistName(name: String): String = buildString(name.length) {
-    var previousWasSpace = true
-    name.forEach { character ->
-        val isSpace = Character.isWhitespace(character) || Character.isSpaceChar(character)
-        if (isSpace) {
-            if (!previousWasSpace) append(' ')
-        } else {
-            append(character)
-        }
-        previousWasSpace = isSpace
-    }
-    if (isNotEmpty() && last() == ' ') deleteAt(lastIndex)
-}
-
-private fun artistKey(name: String): String = Normalizer.normalize(
-    Normalizer.normalize(name, Normalizer.Form.NFC).lowercase(Locale.ROOT),
-    Normalizer.Form.NFC
-)
+private fun artistKey(name: String): String = artistIdentity(name)

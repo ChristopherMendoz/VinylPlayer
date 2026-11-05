@@ -5,6 +5,10 @@ plugins {
     id("org.jetbrains.kotlin.kapt")
 }
 
+val theAudioDbApiKey = providers.gradleProperty("THEAUDIODB_API_KEY").orNull.orEmpty()
+    .replace("\\", "\\\\")
+    .replace("\"", "\\\"")
+
 android {
     namespace = "com.chrismdz.vinylplayer"
     compileSdk = 34
@@ -15,6 +19,7 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1"
+        buildConfigField("String", "THEAUDIODB_API_KEY", "\"$theAudioDbApiKey\"")
     }
 
     buildTypes {
@@ -38,6 +43,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
