@@ -9,6 +9,8 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.workDataOf
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.security.MessageDigest
 import java.util.concurrent.TimeUnit
@@ -19,6 +21,16 @@ class ArtistImageWorkScheduler(
 ) {
     private val appContext = context.applicationContext
     private val workManager = WorkManager.getInstance(appContext)
+    private val schedulingMutex = Mutex()
+
+    suspend fun cancelPendingPrefetch() = withContext(Dispatchers.IO) {
+        schedulingMutex.withLock {
+            artistDao.findPendingArtistImageWork().forEach { artist ->
+                workManager.cancelUniqueWork(workName(artist.artistId))
+            }
+            artistDao.resetPendingArtistImageWork()
+        }
+    }
 
     suspend fun scheduleEligibleArtists() = withContext(Dispatchers.IO) {
         val now = System.currentTimeMillis()
@@ -28,7 +40,9 @@ class ArtistImageWorkScheduler(
     }
 
     suspend fun scheduleArtist(artistId: String, force: Boolean = false) = withContext(Dispatchers.IO) {
-        enqueue(artistId, force, System.currentTimeMillis())
+        schedulingMutex.withLock {
+            enqueue(artistId, force, System.currentTimeMillis())
+        }
     }
 
     private suspend fun enqueue(artistId: String, force: Boolean, now: Long) {

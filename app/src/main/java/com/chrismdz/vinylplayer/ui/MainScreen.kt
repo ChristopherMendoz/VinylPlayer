@@ -406,6 +406,7 @@ fun MainScreen(viewModel: PlayerViewModel, onRequestAudioPermission: () -> Unit 
                     }
                 )
                 MainView.PLAYER -> PlayerView(
+                    viewModel = viewModel,
                     state = state,
                     tab = playerTab,
                     onTabChange = { playerTabName = it.name },
@@ -1697,6 +1698,7 @@ private fun MiniPlayer(
 
 @Composable
 private fun PlayerView(
+    viewModel: PlayerViewModel,
     state: PlayerUiState,
     tab: PlayerTab,
     onTabChange: (PlayerTab) -> Unit,
@@ -1711,6 +1713,7 @@ private fun PlayerView(
     onRepeat: () -> Unit,
     onQueue: () -> Unit
 ) {
+    val playbackPositionMs by viewModel.playbackPositionMs.collectAsStateWithLifecycle()
     val file = state.musicFile
     if (file == null) {
         Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -1760,13 +1763,13 @@ private fun PlayerView(
                 }
                 Spacer(modifier = Modifier.height(12.dp))
                 Slider(
-                    value = progress(state.positionMs, state.durationMs),
+                    value = progress(playbackPositionMs, state.durationMs),
                     onValueChange = onSeek,
                     modifier = Modifier.fillMaxWidth(),
                     colors = playerSliderColors()
                 )
                 Row(Modifier.fillMaxWidth(), Arrangement.SpaceBetween) {
-                    Text(formatTime(state.positionMs), color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f), fontSize = 11.sp)
+                    Text(formatTime(playbackPositionMs), color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f), fontSize = 11.sp)
                     Text(formatTime(state.durationMs), color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f), fontSize = 11.sp)
                 }
                 PlayerTransportControls(
@@ -1796,6 +1799,7 @@ private fun PlayerView(
                     LyricsPlayerHeader(
                         file = file,
                         state = state,
+                        positionMs = playbackPositionMs,
                         isFavorite = state.isFavorite,
                         onFavorite = onFavorite,
                         onSeek = {
@@ -1820,7 +1824,7 @@ private fun PlayerView(
                             LyricsOverlay(
                                 lyrics = state.lyrics,
                                 status = state.lyricsStatus,
-                                positionMs = state.positionMs,
+                                positionMs = playbackPositionMs,
                                 offsetMs = state.lyricsOffsetMs,
                                 showTranslation = state.showTranslatedLyrics,
                                 fontSizeSp = state.appSettings.lyricsFontSizeSp,
@@ -1855,6 +1859,7 @@ private fun PlayerView(
 private fun LyricsPlayerHeader(
     file: MusicFile,
     state: PlayerUiState,
+    positionMs: Long,
     isFavorite: Boolean,
     onFavorite: () -> Unit,
     onSeek: (Float) -> Unit,
@@ -1916,13 +1921,13 @@ private fun LyricsPlayerHeader(
             }
         }
         Slider(
-            value = progress(state.positionMs, state.durationMs),
+            value = progress(positionMs, state.durationMs),
             onValueChange = onSeek,
             modifier = Modifier.fillMaxWidth(),
             colors = playerSliderColors()
         )
         Row(Modifier.fillMaxWidth().padding(horizontal = 4.dp), Arrangement.SpaceBetween) {
-            Text(formatTime(state.positionMs), color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f), fontSize = 11.sp)
+            Text(formatTime(positionMs), color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f), fontSize = 11.sp)
             Text(formatTime(state.durationMs), color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f), fontSize = 11.sp)
         }
     }
@@ -2284,7 +2289,16 @@ private fun LyricsOverlay(
     val syncedLines = remember(activeSyncedText) {
         activeSyncedText?.let(::parseSyncedLyrics).orEmpty()
     }
-    val currentLine = syncedLines.indexOfLast { it.startMs <= positionMs + offsetMs }
+    val playbackTime = positionMs + offsetMs
+    val currentLine = remember(syncedLines, playbackTime) {
+        var low = 0
+        var high = syncedLines.size
+        while (low < high) {
+            val middle = (low + high) ushr 1
+            if (syncedLines[middle].startMs <= playbackTime) low = middle + 1 else high = middle
+        }
+        low - 1
+    }
     val firstVisibleLine = if (currentLine >= 0) (currentLine - previousLines).coerceAtLeast(0) else 0
     val lastVisibleLine = if (currentLine >= 0) {
         (currentLine + nextLines).coerceAtMost(syncedLines.lastIndex)

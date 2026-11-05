@@ -14,9 +14,12 @@ import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
 import com.chrismdz.vinylplayer.ui.MainScreen
 import com.chrismdz.vinylplayer.ui.PlayerViewModel
 import com.chrismdz.vinylplayer.ui.VinylPlayerTheme
+import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.map
 
 class MainActivity : ComponentActivity() {
     private val playerViewModel: PlayerViewModel by viewModels()
@@ -35,11 +38,16 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         requestMusicPermissions()
         setContent {
-            val state by playerViewModel.uiState.collectAsStateWithLifecycle()
+            val settingsFlow = remember(playerViewModel) {
+                playerViewModel.uiState.map { it.appSettings }.distinctUntilChanged()
+            }
+            val appSettings by settingsFlow.collectAsStateWithLifecycle(
+                initialValue = playerViewModel.uiState.value.appSettings
+            )
             VinylPlayerTheme(
-                themeMode = state.appSettings.themeMode,
-                accentColor = state.appSettings.accentColor,
-                customAccentArgb = state.appSettings.customAccentArgb
+                themeMode = appSettings.themeMode,
+                accentColor = appSettings.accentColor,
+                customAccentArgb = appSettings.customAccentArgb
             ) {
                 MainScreen(viewModel = playerViewModel, onRequestAudioPermission = ::requestMusicPermissions)
             }

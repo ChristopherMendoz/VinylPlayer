@@ -143,6 +143,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         )
     )
     val uiState: StateFlow<PlayerUiState> = _uiState.asStateFlow()
+    private val _playbackPositionMs = MutableStateFlow(cachedCurrentPosition)
+    val playbackPositionMs: StateFlow<Long> = _playbackPositionMs.asStateFlow()
 
     private var musicPlayer: MusicPlayer? = null
     private var positionJob: Job? = null
@@ -150,6 +152,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private var lyricsJob: Job? = null
     private var sleepTimerJob: Job? = null
     private var artistCatalogJob: Job? = null
+    private var legacyArtistImageCleanupJob: Job? = null
     private var libraryLoaded = false
     private var pendingForcedLibraryScan = false
     private val artworkLoads = mutableSetOf<String>()
@@ -157,6 +160,15 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private var pendingSongTagEdit: PendingSongTagEdit? = null
 
     fun initialize() {
+        if (!preferences.getBoolean(LEGACY_ARTIST_IMAGE_PREFETCH_CLEANUP_KEY, false) &&
+            legacyArtistImageCleanupJob?.isActive != true
+        ) {
+            legacyArtistImageCleanupJob = viewModelScope.launch(Dispatchers.IO) {
+                if (runCatching { artistImageWorkScheduler.cancelPendingPrefetch() }.isSuccess) {
+                    preferences.edit().putBoolean(LEGACY_ARTIST_IMAGE_PREFETCH_CLEANUP_KEY, true).apply()
+                }
+            }
+        }
         observeArtistCatalog()
         if (musicPlayer == null) {
             musicPlayer = MusicPlayer(
@@ -170,15 +182,17 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 val current = currentEntry?.file ?: previousState.library.firstOrNull {
                     it.uri.toString() == mediaId
                 } ?: previousState.musicFile
+                val currentPosition = player.currentPosition.coerceAtLeast(0L)
                 val trackChanged = currentEntry?.id != previousState.currentQueueEntryId ||
                     current?.uri != previousState.musicFile?.uri
+                _playbackPositionMs.value = currentPosition
 
                 _uiState.update { state ->
                     state.copy(
                         musicFile = current,
                         currentQueueEntryId = currentEntry?.id ?: state.currentQueueEntryId,
                         isPlaying = player.isPlaying,
-                        positionMs = player.currentPosition,
+                        positionMs = currentPosition,
                         durationMs = player.duration.takeIf { duration -> duration > 0 }
                             ?: current?.durationMs
                             ?: 0L,
@@ -196,8 +210,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     saveQueueCache(currentState.queue, currentState.currentQueueEntryId)
                     current?.let {
                         saveCurrentFile(it)
+                        savePlaybackPosition(currentPosition)
                         loadLyrics(it)
                     }
+                } else if (previousState.isPlaying && !player.isPlaying) {
+                    savePlaybackPosition(currentPosition)
                 }
                 if (player.playbackState == Player.STATE_ENDED) handleTrackEnded()
             }
@@ -212,14 +229,22 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             )
             musicPlayer?.setRepeatOneEnabled(restoredState.repeatMode == RepeatMode.ONE)
 
+            var lastPositionSavedAt = android.os.SystemClock.elapsedRealtime()
             positionJob = viewModelScope.launch {
                 while (isActive) {
-                    _uiState.update { state ->
-                        val position = musicPlayer?.currentPosition() ?: state.positionMs
-                        if (state.musicFile != null) savePlaybackPosition(position)
-                        state.copy(positionMs = position)
+                    val state = _uiState.value
+                    if (state.isPlaying && state.musicFile != null) {
+                        val position = musicPlayer?.currentPositionOrNull() ?: state.positionMs
+                        _playbackPositionMs.value = position
+                        val now = android.os.SystemClock.elapsedRealtime()
+                        if (now - lastPositionSavedAt >= POSITION_SAVE_INTERVAL_MS) {
+                            savePlaybackPosition(position)
+                            lastPositionSavedAt = now
+                        }
+                        delay(POSITION_POLL_INTERVAL_MS)
+                    } else {
+                        delay(POSITION_IDLE_INTERVAL_MS)
                     }
-                    delay(500)
                 }
             }
         }
@@ -242,7 +267,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     val files = repository.readLibraryMetadata(getApplication())
                     val artistSyncError = runCatching {
                         artistLibraryRepository.refresh(files)
-                        artistImageWorkScheduler.scheduleEligibleArtists()
                     }
                         .exceptionOrNull()?.let { it.message ?: "No se pudo actualizar el catálogo" }
                     LibraryScanResult(files, artistSyncError)
@@ -382,6 +406,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         ) return
         viewModelScope.launch(Dispatchers.IO) {
             try {
+                legacyArtistImageCleanupJob?.join()
                 val image = runCatching { artistImageRepository.loadCachedImage(artist.artistId) }.getOrNull()
                 withContext(Dispatchers.Main) {
                     if (image != null) {
@@ -665,7 +690,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 val artistSyncError = runCatching {
                     withContext(Dispatchers.IO) {
                         artistLibraryRepository.refresh(updatedLibrary)
-                        artistImageWorkScheduler.scheduleEligibleArtists()
                     }
                 }.exceptionOrNull()
                 _uiState.update {
@@ -786,7 +810,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             val artistSyncError = runCatching {
                 withContext(Dispatchers.IO) {
                     artistLibraryRepository.refresh(_uiState.value.library)
-                    artistImageWorkScheduler.scheduleEligibleArtists()
                 }
             }.exceptionOrNull()
             if (artistSyncError != null) {
@@ -884,19 +907,17 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun playSelected(entry: QueueEntry, queue: List<QueueEntry>) {
-        viewModelScope.launch {
-            val detailedFile = runCatching {
-                withContext(Dispatchers.IO) { repository.readMetadata(getApplication(), entry.file.uri) }
-            }.getOrDefault(entry.file)
-            val detailedEntry = entry.copy(file = detailedFile)
-            val updatedQueue = queue.map { if (it.id == entry.id) detailedEntry else it }
-            playFile(detailedEntry, updatedQueue, true)
+        val currentState = _uiState.value
+        if (currentState.currentQueueEntryId != entry.id) {
+            savePlaybackPosition(_playbackPositionMs.value)
         }
+        playFile(entry, queue, true)
     }
 
     private fun playFile(entry: QueueEntry, queue: List<QueueEntry>, playWhenReady: Boolean) {
         val file = entry.file
         saveCurrentFile(file)
+        _playbackPositionMs.value = 0L
         _uiState.update {
             it.copy(
                 musicFile = file,
@@ -913,6 +934,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 errorMessage = null
             )
         }
+        savePlaybackPosition(0L)
         saveQueueCache(queue, entry.id)
         musicPlayer?.load(entry, queue, playWhenReady, _uiState.value.shuffleEnabled)
         loadLyrics(file)
@@ -1083,7 +1105,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun skipPrevious() {
         val state = _uiState.value
-        val position = musicPlayer?.currentPosition() ?: state.positionMs
+        val position = musicPlayer?.currentPositionOrNull() ?: _playbackPositionMs.value
         if (position > 3_000L) {
             musicPlayer?.seekTo(0L)
             return
@@ -1138,7 +1160,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun seekTo(fraction: Float) {
         val duration = _uiState.value.durationMs
-        if (duration > 0) musicPlayer?.seekTo((duration * fraction).toLong())
+        if (duration > 0) {
+            val position = (duration * fraction).toLong().coerceIn(0L, duration)
+            _playbackPositionMs.value = position
+            musicPlayer?.seekTo(position)
+        }
     }
 
     fun toggleFavorite() {
@@ -1253,7 +1279,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         if (previous.resumeLastSession != updated.resumeLastSession) {
             if (updated.resumeLastSession) {
                 state.musicFile?.let(::saveCurrentFile)
-                savePlaybackPosition(state.positionMs)
+                savePlaybackPosition(_playbackPositionMs.value)
             } else {
                 preferences.edit()
                     .remove("current_file_cache")
@@ -1450,6 +1476,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun release() {
+        musicPlayer?.currentPositionOrNull()?.let(::savePlaybackPosition)
         positionJob?.cancel()
         positionJob = null
         lyricsJob?.cancel()
@@ -1468,5 +1495,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     companion object {
         private val LYRICS_CACHE_DURATION_MS = TimeUnit.DAYS.toMillis(7)
         private const val MAX_CACHED_ARTIST_BITMAPS = 40
+        private const val POSITION_POLL_INTERVAL_MS = 500L
+        private const val POSITION_IDLE_INTERVAL_MS = 1_000L
+        private const val POSITION_SAVE_INTERVAL_MS = 5_000L
+        private const val LEGACY_ARTIST_IMAGE_PREFETCH_CLEANUP_KEY = "artist_image_prefetch_cleanup_complete"
     }
 }

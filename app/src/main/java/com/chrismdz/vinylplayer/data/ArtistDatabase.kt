@@ -94,6 +94,12 @@ interface ArtistDao {
         (imageStatus IN ('NOT_FOUND', 'ERROR') AND (imageRetryAfter IS NULL OR imageRetryAfter <= :now))""")
     suspend fun findArtistsNeedingImageWork(now: Long): List<ArtistEntity>
 
+    @Query("SELECT * FROM artists WHERE imageStatus IN ('PENDING', 'DOWNLOADING')")
+    suspend fun findPendingArtistImageWork(): List<ArtistEntity>
+
+    @Query("UPDATE artists SET imageStatus = 'NOT_DOWNLOADED', imageError = NULL, imageRetryAfter = NULL WHERE imageStatus IN ('PENDING', 'DOWNLOADING')")
+    suspend fun resetPendingArtistImageWork()
+
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertArtists(artists: List<ArtistEntity>)
 
