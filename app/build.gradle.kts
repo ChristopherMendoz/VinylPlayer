@@ -5,10 +5,6 @@ plugins {
     id("org.jetbrains.kotlin.kapt")
 }
 
-val theAudioDbApiKey = providers.gradleProperty("THEAUDIODB_API_KEY").orNull.orEmpty()
-    .replace("\\", "\\\\")
-    .replace("\"", "\\\"")
-
 android {
     namespace = "com.chrismdz.vinylplayer"
     compileSdk = 34
@@ -19,7 +15,6 @@ android {
         targetSdk = 34
         versionCode = 1
         versionName = "0.1"
-        buildConfigField("String", "THEAUDIODB_API_KEY", "\"$theAudioDbApiKey\"")
     }
 
     buildTypes {
@@ -43,7 +38,6 @@ android {
 
     buildFeatures {
         compose = true
-        buildConfig = true
     }
 }
 
@@ -53,6 +47,7 @@ dependencies {
     implementation("androidx.activity:activity-compose:1.9.3")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.8.7")
     implementation("androidx.lifecycle:lifecycle-viewmodel-ktx:2.8.7")
+    implementation("androidx.work:work-runtime:2.9.1")
 
     implementation("androidx.compose.ui:ui")
     implementation("androidx.compose.ui:ui-tooling-preview")

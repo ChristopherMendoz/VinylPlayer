@@ -36,7 +36,7 @@ interface LyricsDao {
     suspend fun save(lyrics: LyricsEntity)
 }
 
-@Database(entities = [LyricsEntity::class, ArtistEntity::class, ArtistTrackCreditEntity::class], version = 4, exportSchema = false)
+@Database(entities = [LyricsEntity::class, ArtistEntity::class, ArtistTrackCreditEntity::class], version = 5, exportSchema = false)
 abstract class VinylDatabase : RoomDatabase() {
     abstract fun lyricsDao(): LyricsDao
     abstract fun artistDao(): ArtistDao
@@ -49,7 +49,7 @@ abstract class VinylDatabase : RoomDatabase() {
                 context.applicationContext,
                 VinylDatabase::class.java,
                 "vinylplayer.db"
-            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4).build().also { instance = it }
+            ).addMigrations(MIGRATION_1_2, MIGRATION_2_3, MIGRATION_3_4, MIGRATION_4_5).build().also { instance = it }
         }
 
         private val MIGRATION_1_2 = object : androidx.room.migration.Migration(1, 2) {
@@ -76,6 +76,21 @@ abstract class VinylDatabase : RoomDatabase() {
                 database.execSQL(
                     "CREATE INDEX IF NOT EXISTS index_artist_track_credits_songId ON artist_track_credits(songId)"
                 )
+            }
+        }
+
+        private val MIGRATION_4_5 = object : androidx.room.migration.Migration(4, 5) {
+            override fun migrate(database: androidx.sqlite.db.SupportSQLiteDatabase) {
+                database.execSQL("ALTER TABLE artists ADD COLUMN imageStatus TEXT NOT NULL DEFAULT 'NOT_DOWNLOADED'")
+                database.execSQL("ALTER TABLE artists ADD COLUMN imageSource TEXT")
+                database.execSQL("ALTER TABLE artists ADD COLUMN imageLicense TEXT")
+                database.execSQL("ALTER TABLE artists ADD COLUMN imageAttribution TEXT")
+                database.execSQL("ALTER TABLE artists ADD COLUMN imagePageUrl TEXT")
+                database.execSQL("ALTER TABLE artists ADD COLUMN imageRetryAfter INTEGER")
+                database.execSQL("ALTER TABLE artists ADD COLUMN imageError TEXT")
+                database.execSQL("""UPDATE artists SET imageSource = 'TheAudioDB',
+                    imageAttribution = 'TheAudioDB', imagePageUrl = 'https://www.theaudiodb.com/'
+                    WHERE imageUrl IS NOT NULL""")
             }
         }
     }

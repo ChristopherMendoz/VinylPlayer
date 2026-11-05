@@ -15,9 +15,9 @@ import androidx.media3.common.Player
 import com.chrismdz.vinylplayer.data.MusicFile
 import com.chrismdz.vinylplayer.data.ArtistCatalogItem
 import com.chrismdz.vinylplayer.data.ArtistImageRepository
+import com.chrismdz.vinylplayer.data.ArtistImageWorkScheduler
 import com.chrismdz.vinylplayer.data.ArtistLibraryRepository
 import com.chrismdz.vinylplayer.data.ArtistTrackLink
-import com.chrismdz.vinylplayer.data.TheAudioDbArtistImageProvider
 import com.chrismdz.vinylplayer.data.sortArtistCatalog
 import com.chrismdz.vinylplayer.data.QueueEntry
 import com.chrismdz.vinylplayer.data.MusicRepository
@@ -101,11 +101,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private val artistLibraryRepository = ArtistLibraryRepository(database.artistDao())
     private val artistImageRepository = ArtistImageRepository(
         artistDao = database.artistDao(),
-        provider = com.chrismdz.vinylplayer.BuildConfig.THEAUDIODB_API_KEY
-            .takeIf(String::isNotBlank)
-            ?.let(::TheAudioDbArtistImageProvider),
+        providers = emptyList(),
         imageDirectory = File(application.filesDir, "artist-images")
     )
+    private val artistImageWorkScheduler = ArtistImageWorkScheduler(application, database.artistDao())
     private val lyricsRepository = RoomLyricsRepository(database.lyricsDao())
     private val preferences = application.getSharedPreferences("vinylplayer_settings", 0)
     private val settingsPreferences = SettingsPreferences(application)
@@ -155,7 +154,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private var pendingForcedLibraryScan = false
     private val artworkLoads = mutableSetOf<String>()
     private val artistImageLoads = mutableSetOf<String>()
-    private val artistImageFailureAt = mutableMapOf<String, Long>()
     private var pendingSongTagEdit: PendingSongTagEdit? = null
 
     fun initialize() {
@@ -242,7 +240,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             runCatching {
                 withContext(Dispatchers.IO) {
                     val files = repository.readLibraryMetadata(getApplication())
-                    val artistSyncError = runCatching { artistLibraryRepository.refresh(files) }
+                    val artistSyncError = runCatching {
+                        artistLibraryRepository.refresh(files)
+                        artistImageWorkScheduler.scheduleEligibleArtists()
+                    }
                         .exceptionOrNull()?.let { it.message ?: "No se pudo actualizar el catálogo" }
                     LibraryScanResult(files, artistSyncError)
                 }
@@ -377,24 +378,31 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun loadArtistImage(artist: ArtistCatalogItem) {
         if (_uiState.value.artistImages.containsKey(artist.artistId) ||
-            artistImageFailureAt[artist.artistId]?.let { System.currentTimeMillis() - it < ARTIST_IMAGE_RETRY_MS } == true ||
             !artistImageLoads.add(artist.artistId)
         ) return
         viewModelScope.launch(Dispatchers.IO) {
-            val image = runCatching { artistImageRepository.loadImage(artist) }.getOrNull()
-            withContext(Dispatchers.Main) {
-                artistImageLoads.remove(artist.artistId)
-                if (image != null) {
-                    artistImageFailureAt.remove(artist.artistId)
-                    _uiState.update { current ->
-                        val images = current.artistImages.toMutableMap()
-                        images[artist.artistId] = image
-                        while (images.size > MAX_CACHED_ARTIST_BITMAPS) images.remove(images.keys.first())
-                        current.copy(artistImages = images)
+            try {
+                val image = runCatching { artistImageRepository.loadCachedImage(artist.artistId) }.getOrNull()
+                withContext(Dispatchers.Main) {
+                    if (image != null) {
+                        _uiState.update { current ->
+                            val images = current.artistImages.toMutableMap()
+                            images[artist.artistId] = image
+                            while (images.size > MAX_CACHED_ARTIST_BITMAPS) images.remove(images.keys.first())
+                            current.copy(artistImages = images)
+                        }
                     }
-                } else {
-                    artistImageFailureAt[artist.artistId] = System.currentTimeMillis()
                 }
+                if (image == null) {
+                    runCatching {
+                        artistImageWorkScheduler.scheduleArtist(
+                            artist.artistId,
+                            force = artist.imageStatus == com.chrismdz.vinylplayer.data.ArtistImageStatus.DOWNLOADED
+                        )
+                    }
+                }
+            } finally {
+                artistImageLoads.remove(artist.artistId)
             }
         }
     }
@@ -451,14 +459,14 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     fun playAlbum(files: List<MusicFile>, shuffle: Boolean = false) {
-        startAlbumPlayback(files, shuffle, null)
+        startGroupedPlayback(files, shuffle, null)
     }
 
-    fun playAlbumTrack(files: List<MusicFile>, startingFile: MusicFile) {
-        startAlbumPlayback(files, shuffle = false, startingFile = startingFile)
+    fun playGroupedTrack(files: List<MusicFile>, startingFile: MusicFile) {
+        startGroupedPlayback(files, shuffle = false, startingFile = startingFile)
     }
 
-    private fun startAlbumPlayback(files: List<MusicFile>, shuffle: Boolean, startingFile: MusicFile?) {
+    private fun startGroupedPlayback(files: List<MusicFile>, shuffle: Boolean, startingFile: MusicFile?) {
         val entries = files.distinctBy { it.uri }.map(QueueEntry::create)
         if (entries.isEmpty()) return
         val ordered = if (shuffle) entries.shuffled() else entries
@@ -655,7 +663,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 }
                 val updatedCurrent = state.musicFile?.let { if (it.uri == edit.file.uri) updatedFile else it }
                 val artistSyncError = runCatching {
-                    withContext(Dispatchers.IO) { artistLibraryRepository.refresh(updatedLibrary) }
+                    withContext(Dispatchers.IO) {
+                        artistLibraryRepository.refresh(updatedLibrary)
+                        artistImageWorkScheduler.scheduleEligibleArtists()
+                    }
                 }.exceptionOrNull()
                 _uiState.update {
                     it.copy(
@@ -773,7 +784,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                 )
             }
             val artistSyncError = runCatching {
-                withContext(Dispatchers.IO) { artistLibraryRepository.refresh(_uiState.value.library) }
+                withContext(Dispatchers.IO) {
+                    artistLibraryRepository.refresh(_uiState.value.library)
+                    artistImageWorkScheduler.scheduleEligibleArtists()
+                }
             }.exceptionOrNull()
             if (artistSyncError != null) {
                 _uiState.update {
@@ -1453,7 +1467,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     companion object {
         private val LYRICS_CACHE_DURATION_MS = TimeUnit.DAYS.toMillis(7)
-        private val ARTIST_IMAGE_RETRY_MS = TimeUnit.MINUTES.toMillis(2)
         private const val MAX_CACHED_ARTIST_BITMAPS = 40
     }
 }

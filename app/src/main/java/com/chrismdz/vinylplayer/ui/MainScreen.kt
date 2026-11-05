@@ -400,8 +400,8 @@ fun MainScreen(viewModel: PlayerViewModel, onRequestAudioPermission: () -> Unit 
                     onFavorite = viewModel::toggleFavorite,
                     isFavorite = state.isFavorite,
                     onPlayAlbum = viewModel::playAlbum,
-                    onPlayAlbumTrack = { files, track ->
-                        viewModel.playAlbumTrack(files, track)
+                    onPlayGroupedTrack = { files, track ->
+                        viewModel.playGroupedTrack(files, track)
                         currentView = MainView.PLAYER
                     }
                 )
@@ -663,7 +663,7 @@ private fun LibraryView(
     artistGridState: androidx.compose.foundation.lazy.grid.LazyGridState,
     onOpenFile: (com.chrismdz.vinylplayer.data.MusicFile) -> Unit,
     onPlayAlbum: (List<com.chrismdz.vinylplayer.data.MusicFile>, Boolean) -> Unit,
-    onPlayAlbumTrack: (List<com.chrismdz.vinylplayer.data.MusicFile>, com.chrismdz.vinylplayer.data.MusicFile) -> Unit,
+    onPlayGroupedTrack: (List<com.chrismdz.vinylplayer.data.MusicFile>, com.chrismdz.vinylplayer.data.MusicFile) -> Unit,
     onOpenCurrent: () -> Unit,
     onTogglePlayback: () -> Unit,
     onFavorite: () -> Unit,
@@ -891,7 +891,7 @@ private fun LibraryView(
                             currentFile = state.musicFile,
                             listState = albumDetailListState,
                             onRequestArtwork = onRequestArtwork,
-                            onOpenFile = { file -> onPlayAlbumTrack(selectedAlbumFiles, file) },
+                            onOpenFile = { file -> onPlayGroupedTrack(selectedAlbumFiles, file) },
                             onPlay = { shuffle -> onPlayAlbum(selectedAlbumFiles, shuffle) },
                             onChooseAlbumCover = onChooseAlbumCover,
                             selectedAlbumArtworkOverrideUri = albumArtworkOverrideUri,
@@ -917,7 +917,7 @@ private fun LibraryView(
                             onBack = { onArtistSelected(null) },
                             onRequestImage = onRequestArtistImage,
                             onRequestArtwork = onRequestArtwork,
-                            onOpenFile = onOpenFile,
+                            onOpenFile = { file -> onPlayGroupedTrack(selectedArtistFiles, file) },
                             onMore = onMore,
                             onAddToPlaylist = onAddToPlaylist
                         )
@@ -1384,7 +1384,7 @@ private fun ArtistGrid(
         verticalArrangement = Arrangement.spacedBy(12.dp)
     ) {
         gridItems(artists, key = { it.artistId }) { artist ->
-            LaunchedEffect(artist.artistId) { onRequestArtistImage(artist) }
+            LaunchedEffect(artist.artistId, artist.imageStatus) { onRequestArtistImage(artist) }
             Card(
                 modifier = Modifier.fillMaxWidth().clickable { onSelect(artist) },
                 shape = RoundedCornerShape(16.dp),
@@ -1439,7 +1439,7 @@ private fun ArtistDetailContent(
 ) {
     val uriHandler = LocalUriHandler.current
     val linksBySongId = remember(links) { links.associateBy { it.songId } }
-    LaunchedEffect(artist?.artistId) { artist?.let(onRequestImage) }
+    LaunchedEffect(artist?.artistId, artist?.imageStatus) { artist?.let(onRequestImage) }
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize(),
@@ -1477,13 +1477,26 @@ private fun ArtistDetailContent(
                         modifier = Modifier.padding(top = 3.dp)
                     )
                     if (image != null) {
+                        val imageCredit = buildList {
+                            add(selected.imageSource ?: "Imagen guardada")
+                            selected.imageAttribution
+                                ?.takeIf { it.isNotBlank() && it != selected.imageSource }
+                                ?.let { add(it) }
+                            selected.imageLicense?.takeIf(String::isNotBlank)?.let { add(it) }
+                        }.joinToString(" · ")
                         Text(
-                            "Imagen: TheAudioDB",
+                            imageCredit,
                             color = MaterialTheme.colorScheme.primary,
                             fontSize = 11.sp,
-                            modifier = Modifier.clickable {
-                                runCatching { uriHandler.openUri("https://www.theaudiodb.com/") }
-                            }.padding(top = 5.dp)
+                            maxLines = 2,
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .clickable(enabled = selected.imagePageUrl != null) {
+                                    selected.imagePageUrl?.let { pageUrl ->
+                                        runCatching { uriHandler.openUri(pageUrl) }
+                                    }
+                                }
+                                .padding(top = 5.dp)
                         )
                     }
                 }
