@@ -71,6 +71,7 @@ import androidx.compose.material.icons.filled.Shuffle
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
@@ -127,6 +128,8 @@ import com.chrismdz.vinylplayer.data.AudioTagWriter
 import com.chrismdz.vinylplayer.data.QueueEntry
 import com.chrismdz.vinylplayer.data.parseSyncedLyrics
 import com.chrismdz.vinylplayer.data.Playlist
+import com.chrismdz.vinylplayer.data.playlistimport.PlaylistImportManager
+import com.chrismdz.vinylplayer.data.playlistimport.PlaylistImportSource
 import com.chrismdz.vinylplayer.data.MusicFile
 import com.chrismdz.vinylplayer.data.ArtistCatalogItem
 import com.chrismdz.vinylplayer.data.ArtistTrackLink
@@ -205,6 +208,11 @@ fun MainScreen(viewModel: PlayerViewModel, onRequestAudioPermission: () -> Unit 
     ) { result ->
         viewModel.completeSongTagWrite(result.resultCode == Activity.RESULT_OK) { pendingTagWriteIntent = it }
     }
+    // Storage Access Framework: the user grants read access to the one document picked; no storage permission.
+    val playlistImportLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri?.let(viewModel::startPlaylistImport)
+    }
+    val playlistImportState by viewModel.playlistImportState.collectAsStateWithLifecycle()
     val playerTab = PlayerTab.valueOf(playerTabName)
     val useDarkColors = when (state.appSettings.themeMode) {
         com.chrismdz.vinylplayer.settings.ThemeMode.DARK -> true
@@ -378,8 +386,14 @@ fun MainScreen(viewModel: PlayerViewModel, onRequestAudioPermission: () -> Unit 
                     onAlbumSelected = { selectedAlbumName = it },
                     onArtistSelected = { selectedArtistId = it },
                     onCreatePlaylist = viewModel::createPlaylist,
-                    onRemoveFromPlaylist = viewModel::removeFromPlaylist,
+                    onRemoveFromPlaylistAt = viewModel::removeFromPlaylistAt,
                     onDeletePlaylist = viewModel::deletePlaylist,
+                    onImportPlaylist = { playlistImportLauncher.launch(PlaylistImportManager.PICKER_MIME_TYPES) },
+                    onPlayPlaylist = { files, index, shuffle ->
+                        viewModel.playPlaylist(files, index, shuffle)
+                        currentView = MainView.PLAYER
+                    },
+                    onQueuePlaylist = viewModel::addPlaylistToQueue,
                     onMore = { menuFile = it },
                     onAddToPlaylist = { playlistTarget = it },
                     searchQuery = searchQuery,
@@ -528,6 +542,32 @@ fun MainScreen(viewModel: PlayerViewModel, onRequestAudioPermission: () -> Unit 
             onDismiss = { showPlayerMenu = false }
         )
     }
+    if (playlistImportState != PlaylistImportState.Idle) {
+        PlaylistImportFlow(
+            state = playlistImportState,
+            library = state.library,
+            onRename = viewModel::renameImportedPlaylist,
+            onSelectPlaylist = viewModel::selectImportedPlaylist,
+            onLink = viewModel::linkImportEntry,
+            onExclude = viewModel::setImportEntryExcluded,
+            onReset = viewModel::resetImportEntry,
+            onExcludeMissing = viewModel::excludeMissingImportEntries,
+            onConfirm = viewModel::confirmPlaylistImport,
+            onCancel = viewModel::cancelPlaylistImport,
+            onPickAnother = {
+                viewModel.cancelPlaylistImport()
+                playlistImportLauncher.launch(PlaylistImportManager.PICKER_MIME_TYPES)
+            },
+            onOpenPlaylist = { name ->
+                viewModel.dismissPlaylistImportResult()
+                searchQuery = ""
+                libraryTabName = LibraryTab.PLAYLISTS.name
+                selectedPlaylistName = name
+                currentView = MainView.LIBRARY
+            },
+            onDismissResult = viewModel::dismissPlaylistImportResult
+        )
+    }
     playlistTarget?.let { file ->
         PlaylistPickerDialog(
             playlists = state.playlists,
@@ -649,8 +689,11 @@ private fun LibraryView(
     onAlbumSelected: (String?) -> Unit,
     onArtistSelected: (String?) -> Unit,
     onCreatePlaylist: (String) -> Unit,
-    onRemoveFromPlaylist: (String, com.chrismdz.vinylplayer.data.MusicFile) -> Unit,
+    onRemoveFromPlaylistAt: (String, Int) -> Unit,
     onDeletePlaylist: (String) -> Unit,
+    onImportPlaylist: () -> Unit,
+    onPlayPlaylist: (List<MusicFile>, Int, Boolean) -> Unit,
+    onQueuePlaylist: (List<MusicFile>) -> Unit,
     onMore: (com.chrismdz.vinylplayer.data.MusicFile) -> Unit,
     onAddToPlaylist: (com.chrismdz.vinylplayer.data.MusicFile) -> Unit,
     searchQuery: String,
@@ -707,8 +750,8 @@ private fun LibraryView(
             else -> state.playlists.firstOrNull { it.name == selectedPlaylistName }
         }
     }
-    val visiblePlaylistSongs = remember(state.library, selectedPlaylist, searchQuery) {
-        playlistSongs(
+    val visiblePlaylistEntries = remember(state.library, selectedPlaylist, searchQuery) {
+        playlistSongEntries(
             library = state.library,
             playlist = selectedPlaylist,
             query = searchQuery,
@@ -717,6 +760,10 @@ private fun LibraryView(
             artist = MusicFile::artist,
             album = MusicFile::album
         )
+    }
+    val visiblePlaylistSongs = remember(visiblePlaylistEntries) { visiblePlaylistEntries.map { it.value } }
+    val fullPlaylistEntries = remember(state.library, selectedPlaylist) {
+        playlistSongEntries(state.library, selectedPlaylist, "", { it.uri.toString() }, MusicFile::title, MusicFile::artist, MusicFile::album)
     }
     val totalAlbums = remember(state.library) { state.library.map { it.album }.distinct().size }
     val totalArtists = state.artistCatalog.size
@@ -731,8 +778,7 @@ private fun LibraryView(
             Triple(selectedArtistFiles.size, selectedArtist?.songCount ?: selectedArtistFiles.size, "canciones del artista")
         } else Triple(artists.size, totalArtists, "artistas")
         LibraryTab.PLAYLISTS -> if (selectedPlaylistName != null) {
-            val fullPlaylistCount = playlistSongs(state.library, selectedPlaylist, "", { it.uri.toString() }, MusicFile::title, MusicFile::artist, MusicFile::album).size
-            Triple(visiblePlaylistSongs.size, fullPlaylistCount, "canciones")
+            Triple(visiblePlaylistSongs.size, fullPlaylistEntries.size, "canciones")
         } else Triple(visiblePlaylists.size + if (showFavorites) 1 else 0, totalPlaylistCount, "listas")
     }
     val hasVisibleContent = when (tab) {
@@ -941,13 +987,23 @@ private fun LibraryView(
                                     PlaylistRow(
                                         name = playlist.name,
                                         count = playlist.songUris.size,
+                                        subtitle = playlist.origin?.let { origin ->
+                                            "Importada · " + PlaylistImportSource.fromName(origin.source).displayName
+                                        },
                                         onClick = { onPlaylistSelected(playlist.name) },
                                         onDelete = { onDeletePlaylist(playlist.name) }
                                     )
                                 }
                                 item {
-                                    TextButton(onClick = { showCreatePlaylist = true }) {
-                                        Text("+ Nueva Playlist", color = MaterialTheme.colorScheme.primary)
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        TextButton(onClick = { showCreatePlaylist = true }) {
+                                            Text("+ Nueva Playlist", color = MaterialTheme.colorScheme.primary)
+                                        }
+                                        TextButton(onClick = onImportPlaylist) {
+                                            Icon(Icons.Default.FolderOpen, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                                            Spacer(Modifier.width(6.dp))
+                                            Text("Importar playlist", color = MaterialTheme.colorScheme.primary)
+                                        }
                                     }
                                 }
                             }
@@ -962,13 +1018,44 @@ private fun LibraryView(
                                         fontSize = 18.sp
                                     )
                                 }
+                                val playlistFiles = remember(fullPlaylistEntries) { fullPlaylistEntries.map { it.value } }
+                                Row(
+                                    modifier = Modifier.fillMaxWidth().padding(bottom = 8.dp),
+                                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                                ) {
+                                    Button(
+                                        onClick = { onPlayPlaylist(playlistFiles, 0, false) },
+                                        enabled = playlistFiles.isNotEmpty(),
+                                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                                    ) {
+                                        Icon(Icons.Default.PlayArrow, null, modifier = Modifier.size(18.dp))
+                                        Spacer(Modifier.width(4.dp))
+                                        Text("Reproducir")
+                                    }
+                                    OutlinedButton(onClick = { onPlayPlaylist(playlistFiles, 0, true) }, enabled = playlistFiles.isNotEmpty()) {
+                                        Icon(Icons.Default.Shuffle, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                                    }
+                                    OutlinedButton(onClick = { onQueuePlaylist(playlistFiles) }, enabled = playlistFiles.isNotEmpty()) {
+                                        Icon(Icons.Default.QueueMusic, "Agregar a la fila", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
+                                    }
+                                }
                                 SongList(
                                     files = visiblePlaylistSongs,
                                     listState = rememberLazyListState(),
                                     state = state,
                                     onRequestArtwork = onRequestArtwork,
                                     onOpenFile = onOpenFile,
-                                    onRemove = { file -> onRemoveFromPlaylist(selectedPlaylistName, file) },
+                                    onOpenIndex = { visibleIndex ->
+                                        val position = visiblePlaylistEntries[visibleIndex].index
+                                        val start = fullPlaylistEntries.indexOfFirst { it.index == position }.coerceAtLeast(0)
+                                        onPlayPlaylist(playlistFiles, start, false)
+                                    },
+                                    itemKeys = visiblePlaylistEntries.map { "${it.index}:${it.value.uri}" },
+                                    onRemove = { file ->
+                                        visiblePlaylistEntries.firstOrNull { it.value == file }?.let {
+                                            onRemoveFromPlaylistAt(selectedPlaylistName, it.index)
+                                        }
+                                    },
                                     onMore = onMore,
                                     onAddToPlaylist = onAddToPlaylist
                                 )
@@ -1055,20 +1142,23 @@ private fun SongList(
     onOpenFile: (com.chrismdz.vinylplayer.data.MusicFile) -> Unit,
     onMore: (com.chrismdz.vinylplayer.data.MusicFile) -> Unit,
     onAddToPlaylist: (com.chrismdz.vinylplayer.data.MusicFile) -> Unit,
-    onRemove: ((com.chrismdz.vinylplayer.data.MusicFile) -> Unit)? = null
+    onRemove: ((com.chrismdz.vinylplayer.data.MusicFile) -> Unit)? = null,
+    /** Playlists may repeat a song, so they pass one key per position instead of the URI. */
+    itemKeys: List<String>? = null,
+    onOpenIndex: ((Int) -> Unit)? = null
 ) {
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize(),
         verticalArrangement = Arrangement.spacedBy(8.dp)
     ) {
-        items(files, key = { it.uri.toString() }) { file ->
+        itemsIndexed(files, key = { index, file -> itemKeys?.getOrNull(index) ?: file.uri.toString() }) { index, file ->
             MusicRow(
                 file = file,
                 isCurrent = file.uri == state.musicFile?.uri,
                 isFavorite = file.uri.toString() in state.favoriteUris,
                 onRequestArtwork = onRequestArtwork,
-                onClick = { onOpenFile(file) },
+                onClick = { onOpenIndex?.invoke(index) ?: onOpenFile(file) },
                 onMore = { onMore(file) },
                 onAddToPlaylist = { onAddToPlaylist(file) },
                 onRemove = onRemove?.let { callback -> { callback(file) } }
@@ -1552,7 +1642,8 @@ private fun PlaylistRow(
     name: String,
     count: Int,
     onClick: () -> Unit,
-    onDelete: (() -> Unit)? = null
+    onDelete: (() -> Unit)? = null,
+    subtitle: String? = null
 ) {
     Row(
         modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.28f)).clickable(onClick = onClick).padding(14.dp),
@@ -1561,7 +1652,11 @@ private fun PlaylistRow(
         Icon(Icons.Default.QueueMusic, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(34.dp))
         Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
             Text(name, color = MaterialTheme.colorScheme.onSurface, fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
-            Text("$count canciones", color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.58f), fontSize = 12.sp)
+            Text(
+                listOfNotNull("$count canciones", subtitle).joinToString(" · "),
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.58f),
+                fontSize = 12.sp
+            )
         }
         onDelete?.let { delete ->
             IconButton(onClick = delete) { Icon(Icons.Default.MoreVert, "Opciones", tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.75f)) }

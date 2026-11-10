@@ -24,6 +24,14 @@ import com.chrismdz.vinylplayer.data.MusicRepository
 import com.chrismdz.vinylplayer.data.AudioTagWriter
 import com.chrismdz.vinylplayer.data.NeedsWriteApprovalException
 import com.chrismdz.vinylplayer.data.Playlist
+import com.chrismdz.vinylplayer.data.PlaylistOrigin
+import com.chrismdz.vinylplayer.data.playlistimport.ImportReviewItem
+import com.chrismdz.vinylplayer.data.playlistimport.MatchStatus
+import com.chrismdz.vinylplayer.data.playlistimport.ParsedPlaylistFile
+import com.chrismdz.vinylplayer.data.playlistimport.PlaylistImportException
+import com.chrismdz.vinylplayer.data.playlistimport.PlaylistImportManager
+import com.chrismdz.vinylplayer.data.playlistimport.PlaylistImportResult
+import com.chrismdz.vinylplayer.data.playlistimport.PlaylistImportReview
 import com.chrismdz.vinylplayer.data.Lyrics
 import com.chrismdz.vinylplayer.data.LyricsStatus
 import com.chrismdz.vinylplayer.data.RoomLyricsRepository
@@ -47,6 +55,7 @@ import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONArray
+import org.json.JSONObject
 import java.io.File
 import java.util.concurrent.TimeUnit
 
@@ -81,6 +90,16 @@ data class PlayerUiState(
     val shuffleEnabled: Boolean get() = appSettings.shuffleEnabled
     val repeatMode: RepeatMode get() = sessionRepeatMode ?: appSettings.repeatMode
     val tonearmAnimationEnabled: Boolean get() = appSettings.tonearmAnimationEnabled
+}
+
+/** Steps of the playlist import flow; kept outside [PlayerUiState] so progress does not recompose the library. */
+sealed interface PlaylistImportState {
+    data object Idle : PlaylistImportState
+    data class Working(val message: String) : PlaylistImportState
+    data class Reviewing(val review: PlaylistImportReview, val nameError: String? = null) : PlaylistImportState
+    data class Saving(val review: PlaylistImportReview) : PlaylistImportState
+    data class Failed(val message: String) : PlaylistImportState
+    data class Finished(val result: PlaylistImportResult) : PlaylistImportState
 }
 
 class PlayerViewModel(application: Application) : AndroidViewModel(application) {
@@ -158,6 +177,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private val artworkLoads = mutableSetOf<String>()
     private val artistImageLoads = mutableSetOf<String>()
     private var pendingSongTagEdit: PendingSongTagEdit? = null
+    private val playlistImportManager = PlaylistImportManager()
+    private var playlistImportJob: Job? = null
+    private var parsedImport: ParsedPlaylistFile? = null
+    private val _playlistImportState = MutableStateFlow<PlaylistImportState>(PlaylistImportState.Idle)
+    val playlistImportState: StateFlow<PlaylistImportState> = _playlistImportState.asStateFlow()
 
     fun initialize() {
         if (!preferences.getBoolean(LEGACY_ARTIST_IMAGE_PREFETCH_CLEANUP_KEY, false) &&
@@ -770,7 +794,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         viewModelScope.launch {
             val stateBeforeDelete = _uiState.value
             val updatedPlaylists = _uiState.value.playlists.map { playlist ->
-                playlist.copy(songUris = playlist.songUris - file.uri.toString())
+                playlist.copy(songUris = playlist.songUris.filterNot { it == file.uri.toString() })
             }
             savePlaylists(updatedPlaylists)
             favoriteUris.remove(file.uri.toString())
@@ -878,16 +902,268 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         savePlaylists(_uiState.value.playlists.filterNot { it.name == name })
     }
 
+    /** Removes one occurrence by its position, so repeated songs keep their other appearances. */
+    fun removeFromPlaylistAt(name: String, position: Int) {
+        savePlaylists(_uiState.value.playlists.map { playlist ->
+            if (playlist.name == name && position in playlist.songUris.indices) {
+                playlist.copy(songUris = playlist.songUris.toMutableList().apply { removeAt(position) })
+            } else playlist
+        })
+    }
+
+    /** Plays a playlist in its stored order, duplicates included, starting at [startIndex]. */
+    fun playPlaylist(files: List<MusicFile>, startIndex: Int = 0, shuffle: Boolean = false) {
+        if (files.isEmpty()) return
+        clearAlbumPlaybackMode()
+        val entries = files.map(QueueEntry::create)
+        val start = startIndex.coerceIn(0, entries.lastIndex)
+        val (selected, order) = when {
+            shuffle -> entries.shuffled().let { it.first() to it }
+            _uiState.value.shuffleEnabled -> entries[start] to (entries.take(start + 1) + entries.drop(start + 1).shuffled())
+            else -> entries[start] to entries
+        }
+        playSelected(selected, order)
+    }
+
+    /** Appends a whole playlist to the end of the queue in its order. */
+    fun addPlaylistToQueue(files: List<MusicFile>) {
+        val state = _uiState.value
+        val toAdd = if (state.appSettings.allowQueueDuplicates) files else {
+            val present = state.queue.mapTo(hashSetOf()) { it.file.uri }
+            files.filter { present.add(it.uri) }
+        }
+        if (toAdd.isEmpty()) return
+        val entries = toAdd.map(QueueEntry::create)
+        entries.forEachIndexed { offset, entry -> musicPlayer?.addQueueEntry(entry, state.queue.size + offset) }
+        val queue = state.queue + entries
+        _uiState.update { it.copy(queue = queue) }
+        saveQueueCache(queue, _uiState.value.currentQueueEntryId)
+    }
+
+    fun startPlaylistImport(uri: Uri) {
+        playlistImportJob?.cancel()
+        parsedImport = null
+        _playlistImportState.value = PlaylistImportState.Working("Leyendo archivo…")
+        playlistImportJob = viewModelScope.launch {
+            runCatching {
+                val document = withContext(Dispatchers.IO) { playlistImportManager.readDocument(getApplication(), uri) }
+                _playlistImportState.value = PlaylistImportState.Working("Detectando formato…")
+                val parsed = withContext(Dispatchers.Default) { playlistImportManager.detectAndParse(document) }
+                parsedImport = parsed
+                _playlistImportState.value = PlaylistImportState.Working("Reconociendo canciones locales…")
+                buildImportReview(parsed, 0, document.fileName)
+            }.onSuccess { review ->
+                _playlistImportState.value = PlaylistImportState.Reviewing(review.withUniqueName())
+            }.onFailure { error ->
+                if (error is kotlinx.coroutines.CancellationException) throw error
+                parsedImport = null
+                _playlistImportState.value = PlaylistImportState.Failed(
+                    if (error is PlaylistImportException) error.message.orEmpty()
+                    else {
+                        android.util.Log.e("PlaylistImport", "Import failed", error)
+                        val root = generateSequence(error) { it.cause }.last()
+                        "Error interno al analizar el archivo (${root.javaClass.simpleName}: ${root.message ?: "sin detalle"})."
+                    }
+                )
+            }
+        }
+    }
+
+    private suspend fun buildImportReview(parsed: ParsedPlaylistFile, index: Int, fileName: String?): PlaylistImportReview {
+        val library = _uiState.value.library
+        val knownLinks = _uiState.value.playlists
+            .mapNotNull { it.origin?.links }
+            .fold(mutableMapOf<String, String>()) { all, links -> all.apply { putAll(links) } }
+        return withContext(Dispatchers.Default) {
+            playlistImportManager.buildReview(parsed, index, fileName, library, knownLinks)
+        }
+    }
+
+    /** For files holding several playlists (e.g. an iTunes library); recomputes matches for the choice. */
+    fun selectImportedPlaylist(index: Int) {
+        val parsed = parsedImport ?: return
+        val current = (_playlistImportState.value as? PlaylistImportState.Reviewing)?.review ?: return
+        if (index == current.selectedPlaylistIndex) return
+        playlistImportJob?.cancel()
+        _playlistImportState.value = PlaylistImportState.Working("Reconociendo canciones locales…")
+        playlistImportJob = viewModelScope.launch {
+            val review = buildImportReview(parsed, index, current.fileName)
+            _playlistImportState.value = PlaylistImportState.Reviewing(review.withUniqueName())
+        }
+    }
+
+    fun renameImportedPlaylist(name: String) {
+        updateImportReview { it.copy(playlistName = name.take(PlaylistImportManager.MAX_NAME_LENGTH)) }
+    }
+
+    fun linkImportEntry(index: Int, uri: String) {
+        if (_uiState.value.library.none { it.uri.toString() == uri }) return
+        updateImportItem(index) { it.copy(status = MatchStatus.MANUALLY_LINKED, selectedUri = uri, excluded = false) }
+    }
+
+    fun setImportEntryExcluded(index: Int, excluded: Boolean) {
+        updateImportItem(index) { it.copy(excluded = excluded) }
+    }
+
+    fun resetImportEntry(index: Int) {
+        updateImportItem(index) { ImportReviewItem(it.entry, it.autoMatch) }
+    }
+
+    fun excludeMissingImportEntries() {
+        updateImportReview { review ->
+            review.copy(items = review.items.map { item ->
+                if (!item.excluded && (item.status == MatchStatus.NOT_FOUND || item.status == MatchStatus.MATCH_AMBIGUOUS)) {
+                    item.copy(excluded = true)
+                } else item
+            })
+        }
+    }
+
+    fun cancelPlaylistImport() {
+        playlistImportJob?.cancel()
+        playlistImportJob = null
+        parsedImport = null
+        _playlistImportState.value = PlaylistImportState.Idle
+    }
+
+    /**
+     * Stores the reviewed playlist in one write. Nothing is persisted before this point, so cancelling
+     * never leaves partial data; if the write fails the in-memory list is left untouched.
+     */
+    fun confirmPlaylistImport() {
+        val review = (_playlistImportState.value as? PlaylistImportState.Reviewing)?.review ?: return
+        val name = review.playlistName.trim()
+        validateImportName(name)?.let { error ->
+            _playlistImportState.value = PlaylistImportState.Reviewing(review, error)
+            return
+        }
+        if (review.ambiguousCount > 0) {
+            _playlistImportState.value = PlaylistImportState.Reviewing(review, "Resuelve o excluye las coincidencias ambiguas.")
+            return
+        }
+        val libraryUris = _uiState.value.library.mapTo(hashSetOf()) { it.uri.toString() }
+        val accepted = review.items.filter { it.willImport && it.selectedUri in libraryUris }
+        if (accepted.isEmpty()) {
+            _playlistImportState.value = PlaylistImportState.Reviewing(review, "No hay canciones locales para importar.")
+            return
+        }
+        val playlist = Playlist(
+            name = name,
+            songUris = accepted.map { it.selectedUri!! },
+            origin = PlaylistOrigin(
+                source = review.source.name,
+                format = review.format.name,
+                fileName = review.fileName,
+                importedAt = System.currentTimeMillis(),
+                totalEntries = review.total,
+                links = accepted.mapNotNull { item -> item.entry.referenceKey?.let { it to item.selectedUri!! } }.toMap()
+            )
+        )
+        _playlistImportState.value = PlaylistImportState.Saving(review)
+        playlistImportJob = viewModelScope.launch {
+            val before = _uiState.value.playlists
+            val updated = before + playlist
+            val stored = withContext(Dispatchers.IO) {
+                preferences.edit().putString("playlists", encodePlaylists(updated)).commit()
+            }
+            if (!stored) {
+                _playlistImportState.value = PlaylistImportState.Reviewing(review, "No se pudo guardar la playlist. Inténtalo de nuevo.")
+                return@launch
+            }
+            val current = _uiState.value.playlists
+            if (current == before) {
+                _uiState.update { it.copy(playlists = updated) }
+            } else {
+                // Another playlist edit happened during the write: merge and persist both.
+                savePlaylists(current.filterNot { it.name.equals(playlist.name, ignoreCase = true) } + playlist)
+            }
+            parsedImport = null
+            _playlistImportState.value = PlaylistImportState.Finished(
+                PlaylistImportResult(
+                    playlistName = playlist.name,
+                    source = review.source,
+                    format = review.format,
+                    totalEntries = review.total,
+                    importedCount = accepted.size,
+                    manuallyLinkedCount = accepted.count { it.status == MatchStatus.MANUALLY_LINKED },
+                    skippedTitles = review.items.filterNot { it.willImport && it.selectedUri in libraryUris }
+                        .map { it.entry.displayTitle }
+                )
+            )
+        }
+    }
+
+    fun dismissPlaylistImportResult() {
+        _playlistImportState.value = PlaylistImportState.Idle
+    }
+
+    private fun validateImportName(name: String): String? = when {
+        name.isEmpty() -> "Escribe un nombre para la playlist."
+        name.equals("Favoritos", ignoreCase = true) || name.equals("Favorito", ignoreCase = true) ->
+            "Ese nombre está reservado."
+        _uiState.value.playlists.any { it.name.equals(name, ignoreCase = true) } -> "Ya existe una playlist con ese nombre."
+        else -> null
+    }
+
+    private fun PlaylistImportReview.withUniqueName(): PlaylistImportReview {
+        val base = playlistName.trim().ifEmpty { "Playlist importada" }
+        if (validateImportName(base) == null) return copy(playlistName = base)
+        val unique = generateSequence(2) { it + 1 }.map { "$base ($it)" }.first { validateImportName(it) == null }
+        return copy(playlistName = unique)
+    }
+
+    private fun updateImportReview(transform: (PlaylistImportReview) -> PlaylistImportReview) {
+        val state = _playlistImportState.value as? PlaylistImportState.Reviewing ?: return
+        _playlistImportState.value = PlaylistImportState.Reviewing(transform(state.review))
+    }
+
+    private fun updateImportItem(index: Int, transform: (ImportReviewItem) -> ImportReviewItem) {
+        updateImportReview { review ->
+            if (index !in review.items.indices) review
+            else review.copy(items = review.items.toMutableList().apply { this[index] = transform(this[index]) })
+        }
+    }
+
     private fun savePlaylists(playlists: List<Playlist>) {
+        preferences.edit().putString("playlists", encodePlaylists(playlists)).apply()
+        _uiState.update { it.copy(playlists = playlists) }
+    }
+
+    /** `[name, [uris], origin?]` per playlist; the optional third element keeps older readers compatible. */
+    private fun encodePlaylists(playlists: List<Playlist>): String {
         val json = JSONArray()
         playlists.forEach { playlist ->
             json.put(JSONArray().apply {
                 put(playlist.name)
                 put(JSONArray(playlist.songUris))
+                playlist.origin?.let { origin ->
+                    put(JSONObject().apply {
+                        put("source", origin.source)
+                        put("format", origin.format)
+                        origin.fileName?.let { put("fileName", it) }
+                        put("importedAt", origin.importedAt)
+                        put("totalEntries", origin.totalEntries)
+                        put("links", JSONObject().apply { origin.links.forEach { (key, uri) -> put(key, uri) } })
+                    })
+                }
             })
         }
-        preferences.edit().putString("playlists", json.toString()).apply()
-        _uiState.update { it.copy(playlists = playlists) }
+        return json.toString()
+    }
+
+    private fun decodeOrigin(json: JSONObject?): PlaylistOrigin? {
+        json ?: return null
+        val links = json.optJSONObject("links")?.let { linksJson ->
+            linksJson.keys().asSequence().associateWith { linksJson.getString(it) }
+        }.orEmpty()
+        return PlaylistOrigin(
+            source = json.optString("source"),
+            format = json.optString("format"),
+            fileName = json.optString("fileName").takeIf(String::isNotBlank),
+            importedAt = json.optLong("importedAt"),
+            totalEntries = json.optInt("totalEntries"),
+            links = links
+        )
     }
 
     private fun loadPlaylists(): List<Playlist> {
@@ -900,7 +1176,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     val songs = item.getJSONArray(1)
                     add(Playlist(item.getString(0), buildList(songs.length()) {
                         for (songIndex in 0 until songs.length()) add(songs.getString(songIndex))
-                    }))
+                    }, decodeOrigin(item.optJSONObject(2))))
                 }
             }
         }.getOrDefault(emptyList())
