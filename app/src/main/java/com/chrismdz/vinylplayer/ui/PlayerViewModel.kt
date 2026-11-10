@@ -85,7 +85,9 @@ data class PlayerUiState(
     val lastLibraryScanAt: Long? = null,
     val errorMessage: String? = null,
     val songTagErrorMessage: String? = null,
-    val sessionRepeatMode: RepeatMode? = null
+    val sessionRepeatMode: RepeatMode? = null,
+    /** False until the saved library/queue have been read in the background at startup. */
+    val sessionRestored: Boolean = true
 ) {
     val shuffleEnabled: Boolean get() = appSettings.shuffleEnabled
     val repeatMode: RepeatMode get() = sessionRepeatMode ?: appSettings.repeatMode
@@ -129,41 +131,77 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private val settingsPreferences = SettingsPreferences(application)
     private val initialSettings = settingsPreferences.load()
     private val favoriteUris = preferences.getStringSet("favorite_uris", emptySet()).orEmpty().toMutableSet()
-    private val cachedLibrary = sortLibrary(loadCachedLibrary(), initialSettings.librarySortOrder)
-    private val cachedCurrentFile = if (initialSettings.resumeLastSession) loadCachedCurrentFile() else null
-    private val cachedQueue = run {
+    private class RestoredSession(
+        val library: List<MusicFile>,
+        val currentFile: MusicFile?,
+        val queue: List<QueueEntry>,
+        val currentEntryId: String?,
+        val positionMs: Long,
+        val lyricsOffsetMs: Long,
+        val playlists: List<Playlist>
+    )
+
+    /** Reads the saved library, queue and current song. Pure preference parsing, safe off the main thread. */
+    private fun restoreSession(): RestoredSession {
+        val library = sortLibrary(loadCachedLibrary(), initialSettings.librarySortOrder)
+        val currentFile = if (initialSettings.resumeLastSession) loadCachedCurrentFile() else null
         val persisted = if (initialSettings.keepQueueBetweenSessions) loadCachedQueue() else emptyList()
-        when {
-            persisted.isEmpty() -> cachedCurrentFile?.let { listOf(QueueEntry.create(it)) }.orEmpty()
-            cachedCurrentFile == null -> persisted
-            persisted.any { it.file.uri == cachedCurrentFile.uri } -> persisted.map { entry ->
-                if (entry.file.uri == cachedCurrentFile.uri) entry.copy(file = cachedCurrentFile) else entry
+        val queue = when {
+            persisted.isEmpty() -> currentFile?.let { listOf(QueueEntry.create(it)) }.orEmpty()
+            currentFile == null -> persisted
+            persisted.any { it.file.uri == currentFile.uri } -> persisted.map { entry ->
+                if (entry.file.uri == currentFile.uri) entry.copy(file = currentFile) else entry
             }
-            else -> listOf(QueueEntry.create(cachedCurrentFile)) + persisted
+            else -> listOf(QueueEntry.create(currentFile)) + persisted
         }
+        val currentEntryId = preferences.getString("current_queue_entry_id", null)
+            ?.takeIf { id -> initialSettings.resumeLastSession && queue.any { it.id == id } }
+            ?: currentFile?.let { file -> queue.firstOrNull { it.file.uri == file.uri }?.id }
+        return RestoredSession(
+            library = library,
+            currentFile = currentFile,
+            queue = queue,
+            currentEntryId = currentEntryId,
+            positionMs = loadCachedCurrentPosition(currentFile),
+            lyricsOffsetMs = loadLyricsOffset(currentFile),
+            playlists = loadPlaylists()
+        )
     }
-    private val cachedCurrentQueueEntryId = preferences.getString("current_queue_entry_id", null)
-        ?.takeIf { id -> initialSettings.resumeLastSession && cachedQueue.any { it.id == id } }
-        ?: cachedCurrentFile?.let { file -> cachedQueue.firstOrNull { it.file.uri == file.uri }?.id }
-    private val cachedCurrentPosition = loadCachedCurrentPosition(cachedCurrentFile)
+
     private val _uiState = MutableStateFlow(
         PlayerUiState(
-            musicFile = cachedCurrentFile,
-            library = cachedLibrary,
-            queue = cachedQueue,
-            currentQueueEntryId = cachedCurrentQueueEntryId,
-            playlists = loadPlaylists(),
             favoriteUris = favoriteUris.toSet(),
-            positionMs = cachedCurrentPosition,
             lastLibraryScanAt = preferences.getLong("last_library_scan_at", 0L).takeIf { it > 0L },
-            lyricsOffsetMs = loadLyricsOffset(cachedCurrentFile),
-            isFavorite = cachedCurrentFile?.uri?.toString()?.let { it in favoriteUris } == true,
-            appSettings = initialSettings
+            appSettings = initialSettings,
+            sessionRestored = false
         )
     )
     val uiState: StateFlow<PlayerUiState> = _uiState.asStateFlow()
-    private val _playbackPositionMs = MutableStateFlow(cachedCurrentPosition)
+    private val _playbackPositionMs = MutableStateFlow(0L)
     val playbackPositionMs: StateFlow<Long> = _playbackPositionMs.asStateFlow()
+
+    /**
+     * Parsing the saved library and queue (thousands of JSON rows) used to run in the constructor on the
+     * main thread and froze startup for seconds. It now runs in the background; the player and the
+     * library scan wait for it.
+     */
+    private val sessionRestore: Job = viewModelScope.launch {
+        val restored = withContext(Dispatchers.Default) { restoreSession() }
+        _playbackPositionMs.value = restored.positionMs
+        _uiState.update { state ->
+            state.copy(
+                musicFile = restored.currentFile,
+                library = state.library.ifEmpty { restored.library },
+                queue = restored.queue,
+                currentQueueEntryId = restored.currentEntryId,
+                positionMs = restored.positionMs,
+                lyricsOffsetMs = restored.lyricsOffsetMs,
+                isFavorite = restored.currentFile?.uri?.toString()?.let { it in favoriteUris } == true,
+                playlists = state.playlists.ifEmpty { restored.playlists },
+                sessionRestored = true
+            )
+        }
+    }
 
     private var musicPlayer: MusicPlayer? = null
     private var positionJob: Job? = null
@@ -173,12 +211,17 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private var artistCatalogJob: Job? = null
     private var legacyArtistImageCleanupJob: Job? = null
     private var libraryLoaded = false
+    private var initialLibraryCheck: Job? = null
     private var pendingForcedLibraryScan = false
     private val artworkLoads = mutableSetOf<String>()
     private val artistImageLoads = mutableSetOf<String>()
     private var pendingSongTagEdit: PendingSongTagEdit? = null
     private val playlistImportManager = PlaylistImportManager()
     private var playlistImportJob: Job? = null
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
+    private val cacheWriter = Dispatchers.Default.limitedParallelism(1)
+    private var queueCacheJob: Job? = null
+    private var libraryCacheJob: Job? = null
     private var parsedImport: ParsedPlaylistFile? = null
     private val _playlistImportState = MutableStateFlow<PlaylistImportState>(PlaylistImportState.Idle)
     val playlistImportState: StateFlow<PlaylistImportState> = _playlistImportState.asStateFlow()
@@ -194,6 +237,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             }
         }
         observeArtistCatalog()
+        if (playerStartJob != null || musicPlayer != null) return
+        playerStartJob = viewModelScope.launch {
+            sessionRestore.join()
+            startPlayer()
+        }
+    }
+
+    private var playerStartJob: Job? = null
+
+    private fun startPlayer() {
         if (musicPlayer == null) {
             musicPlayer = MusicPlayer(
                 context = getApplication(),
@@ -276,8 +329,20 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         _uiState.value.musicFile?.let(::loadLyrics)
     }
 
+    /**
+     * [force] = the user pressed Actualizar: rescan MediaStore. Without it, the saved library is used as
+     * is; only a first run with nothing saved yet scans automatically.
+     */
     fun loadLibrary(force: Boolean = false) {
         observeArtistCatalog()
+        if (!force) {
+            if (libraryLoaded || initialLibraryCheck?.isActive == true) return
+            initialLibraryCheck = viewModelScope.launch {
+                sessionRestore.join()
+                if (_uiState.value.library.isEmpty()) loadLibrary(force = true) else libraryLoaded = true
+            }
+            return
+        }
         if (libraryJob?.isActive == true) {
             if (force) pendingForcedLibraryScan = true
             return
@@ -285,7 +350,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         if (libraryLoaded && !force) return
         if (force) pendingForcedLibraryScan = false
         _uiState.update { it.copy(isLibraryLoading = true) }
+        val sortOrder = _uiState.value.appSettings.librarySortOrder
         val scanJob = viewModelScope.launch {
+            sessionRestore.join()
             runCatching {
                 withContext(Dispatchers.IO) {
                     val files = repository.readLibraryMetadata(getApplication())
@@ -293,10 +360,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                         artistLibraryRepository.refresh(files)
                     }
                         .exceptionOrNull()?.let { it.message ?: "No se pudo actualizar el catálogo" }
-                    LibraryScanResult(files, artistSyncError)
+                    LibraryScanResult(sortLibrary(files, sortOrder), artistSyncError)
                 }
             }.onSuccess { result ->
-                val sortedFiles = sortLibrary(result.files, _uiState.value.appSettings.librarySortOrder)
+                val currentOrder = _uiState.value.appSettings.librarySortOrder
+                val sortedFiles = if (currentOrder == sortOrder) result.files else sortLibrary(result.files, currentOrder)
                 libraryLoaded = true
                 saveLibraryCache(sortedFiles)
                 val state = _uiState.value
@@ -311,8 +379,10 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
                     }
                     if (fromLibrary.none { it.id == currentEntry.id }) listOf(currentEntry) + fromLibrary else fromLibrary
                 } else {
+                    // Map lookup: a linear search per entry froze the UI with long queues.
+                    val filesByUri = sortedFiles.associateBy { it.uri.toString() }
                     state.queue.mapNotNull { entry ->
-                        val file = sortedFiles.firstOrNull { it.uri == entry.file.uri }
+                        val file = filesByUri[entry.file.uri.toString()]
                         when {
                             file != null -> entry.copy(file = file)
                             entry.id == state.currentQueueEntryId -> entry
@@ -381,18 +451,42 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
             withContext(Dispatchers.Main) {
                 artworkLoads.remove(key)
                 if (artwork != null) {
-                    _uiState.update { state ->
-                        val updateFile: (MusicFile) -> MusicFile = { item ->
-                            if (item.uri == file.uri) item.copy(artwork = artwork) else item
+                    pendingArtworks[key] = artwork
+                    if (artworkFlushJob?.isActive != true) {
+                        artworkFlushJob = viewModelScope.launch {
+                            delay(ARTWORK_BATCH_DELAY_MS)
+                            flushArtworks()
                         }
-                        state.copy(
-                            library = state.library.map(updateFile),
-                            queue = state.queue.map { it.copy(file = updateFile(it.file)) },
-                            musicFile = state.musicFile?.let(updateFile)
-                        )
                     }
                 }
             }
+        }
+    }
+
+    private val pendingArtworks = mutableMapOf<String, Bitmap>()
+    private var artworkFlushJob: Job? = null
+
+    /**
+     * Applies every artwork decoded since the last flush in one state update. One update per artwork
+     * re-copied the whole library and queue and recomposed the library for each visible row.
+     * Unchanged items keep their instance, so state equality stays cheap.
+     */
+    private fun flushArtworks() {
+        if (pendingArtworks.isEmpty()) return
+        val loaded = pendingArtworks.toMap()
+        pendingArtworks.clear()
+        val updateFile: (MusicFile) -> MusicFile = { item ->
+            loaded[item.uri.toString()]?.let { item.copy(artwork = it) } ?: item
+        }
+        _uiState.update { state ->
+            state.copy(
+                library = state.library.map(updateFile),
+                queue = state.queue.map { entry ->
+                    val updated = updateFile(entry.file)
+                    if (updated === entry.file) entry else entry.copy(file = updated)
+                },
+                musicFile = state.musicFile?.let(updateFile)
+            )
         }
     }
 
@@ -902,6 +996,31 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         savePlaylists(_uiState.value.playlists.filterNot { it.name == name })
     }
 
+    /**
+     * Saves the result of the playlist editor: new name, new order and removed entries in one write.
+     * Returns an error message, or null when it was stored.
+     */
+    fun updatePlaylist(originalName: String, newName: String, songUris: List<String>): String? {
+        val name = newName.trim()
+        val playlists = _uiState.value.playlists
+        val original = playlists.firstOrNull { it.name == originalName } ?: return "La playlist ya no existe."
+        when {
+            name.isEmpty() -> return "Escribe un nombre para la playlist."
+            name.equals("Favoritos", ignoreCase = true) || name.equals("Favorito", ignoreCase = true) -> return "Ese nombre está reservado."
+            playlists.any { it !== original && it.name.equals(name, ignoreCase = true) } -> return "Ya existe una playlist con ese nombre."
+        }
+        savePlaylists(playlists.map { if (it === original) it.copy(name = name, songUris = songUris) else it })
+        return null
+    }
+
+    /** Appends songs chosen in the playlist's "Agregar" picker, keeping the order they were picked. */
+    fun addSongsToPlaylist(name: String, uris: List<String>) {
+        if (uris.isEmpty()) return
+        savePlaylists(_uiState.value.playlists.map { playlist ->
+            if (playlist.name == name) playlist.copy(songUris = playlist.songUris + uris) else playlist
+        })
+    }
+
     /** Removes one occurrence by its position, so repeated songs keep their other appearances. */
     fun removeFromPlaylistAt(name: String, position: Int) {
         savePlaylists(_uiState.value.playlists.map { playlist ->
@@ -934,7 +1053,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }
         if (toAdd.isEmpty()) return
         val entries = toAdd.map(QueueEntry::create)
-        entries.forEachIndexed { offset, entry -> musicPlayer?.addQueueEntry(entry, state.queue.size + offset) }
+        musicPlayer?.addQueueEntries(entries, state.queue.size)
         val queue = state.queue + entries
         _uiState.update { it.copy(queue = queue) }
         saveQueueCache(queue, _uiState.value.currentQueueEntryId)
@@ -1063,7 +1182,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         playlistImportJob = viewModelScope.launch {
             val before = _uiState.value.playlists
             val updated = before + playlist
-            val stored = withContext(Dispatchers.IO) {
+            // Same ordered lane as other playlist writes, so an older pending write cannot land after this one.
+            val stored = withContext(cacheWriter) {
                 preferences.edit().putString("playlists", encodePlaylists(updated)).commit()
             }
             if (!stored) {
@@ -1125,9 +1245,15 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun savePlaylists(playlists: List<Playlist>) {
-        preferences.edit().putString("playlists", encodePlaylists(playlists)).apply()
         _uiState.update { it.copy(playlists = playlists) }
+        // Encoded on the ordered background lane: imported playlists carry large link tables.
+        playlistCacheJob?.cancel()
+        playlistCacheJob = viewModelScope.launch(cacheWriter) {
+            preferences.edit().putString("playlists", encodePlaylists(playlists)).apply()
+        }
     }
+
+    private var playlistCacheJob: Job? = null
 
     /** `[name, [uris], origin?]` per playlist; the optional third element keeps older readers compatible. */
     private fun encodePlaylists(playlists: List<Playlist>): String {
@@ -1379,10 +1505,14 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         if (_uiState.value.musicFile != null) musicPlayer?.toggle()
     }
 
-    fun skipPrevious() {
+    /**
+     * Previous button: restarts the song after 3 s, otherwise goes back. [forceTrack] (mini player swipe)
+     * always goes to the previous song in the queue.
+     */
+    fun skipPrevious(forceTrack: Boolean = false) {
         val state = _uiState.value
         val position = musicPlayer?.currentPositionOrNull() ?: _playbackPositionMs.value
-        if (position > 3_000L) {
+        if (!forceTrack && position > 3_000L) {
             musicPlayer?.seekTo(0L)
             return
         }
@@ -1587,6 +1717,11 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     private fun saveLibraryCache(files: List<MusicFile>) {
+        libraryCacheJob?.cancel()
+        libraryCacheJob = viewModelScope.launch(cacheWriter) { writeLibraryCache(files) }
+    }
+
+    private fun writeLibraryCache(files: List<MusicFile>) {
         val json = JSONArray()
         files.forEach { file ->
             json.put(
@@ -1611,9 +1746,17 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     private fun saveQueueCache(queue: List<QueueEntry>, currentEntryId: String?) {
         if (!_uiState.value.appSettings.keepQueueBetweenSessions) {
+            queueCacheJob?.cancel()
             preferences.edit().remove("queue_cache").remove("current_queue_entry_id").apply()
             return
         }
+        // Serializing a long queue on the main thread caused visible freezes on every track change.
+        // Writes run on one background lane, so they keep their order; a newer save supersedes a pending one.
+        queueCacheJob?.cancel()
+        queueCacheJob = viewModelScope.launch(cacheWriter) { writeQueueCache(queue, currentEntryId) }
+    }
+
+    private fun writeQueueCache(queue: List<QueueEntry>, currentEntryId: String?) {
         val json = JSONArray()
         queue.forEach { entry ->
             val file = entry.file
@@ -1761,6 +1904,9 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         sleepTimerJob = null
         musicPlayer?.release()
         musicPlayer = null
+        // Lets initialize() build a new player when the activity is recreated with this ViewModel.
+        playerStartJob?.cancel()
+        playerStartJob = null
     }
 
     override fun onCleared() {
@@ -1772,6 +1918,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         private val LYRICS_CACHE_DURATION_MS = TimeUnit.DAYS.toMillis(7)
         private const val MAX_CACHED_ARTIST_BITMAPS = 40
         private const val POSITION_POLL_INTERVAL_MS = 500L
+        private const val ARTWORK_BATCH_DELAY_MS = 150L
         private const val POSITION_IDLE_INTERVAL_MS = 1_000L
         private const val POSITION_SAVE_INTERVAL_MS = 5_000L
         private const val LEGACY_ARTIST_IMAGE_PREFETCH_CLEANUP_KEY = "artist_image_prefetch_cleanup_complete"

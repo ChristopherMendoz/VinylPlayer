@@ -61,8 +61,8 @@ import com.chrismdz.vinylplayer.data.playlistimport.MatchStatus
 import com.chrismdz.vinylplayer.data.playlistimport.PlaylistImportResult
 import com.chrismdz.vinylplayer.data.playlistimport.PlaylistImportReview
 
-private val AmbiguousColor = Color(0xFFFFB74D)
-private val MissingColor = Color(0xFFFF6B6B)
+private val AmbiguousColor = VinylPalette.Warning
+private val MissingColor = VinylPalette.Danger
 
 private enum class ImportFilter(val label: String) {
     PENDING("Pendientes"),

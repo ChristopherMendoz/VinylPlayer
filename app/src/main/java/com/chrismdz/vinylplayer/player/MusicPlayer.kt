@@ -151,6 +151,16 @@ class MusicPlayer(
         }
     }
 
+    /** Inserts several entries with one player call (one timeline update instead of one per song). */
+    fun addQueueEntries(entries: List<QueueEntry>, index: Int) {
+        if (entries.isEmpty()) return
+        val insertionIndex = index.coerceIn(0, pendingQueue.size)
+        pendingQueue = pendingQueue.toMutableList().apply { addAll(insertionIndex, entries) }
+        controller?.let { player ->
+            player.addMediaItems(insertionIndex.coerceIn(0, player.mediaItemCount), entries.map(::toMediaItem))
+        }
+    }
+
     fun moveQueueEntry(fromIndex: Int, toIndex: Int) {
         if (fromIndex == toIndex || fromIndex !in pendingQueue.indices || toIndex !in pendingQueue.indices) return
         pendingQueue = pendingQueue.toMutableList().apply {

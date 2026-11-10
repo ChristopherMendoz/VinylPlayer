@@ -1,13 +1,8 @@
 package com.chrismdz.vinylplayer
 
 import android.Manifest
-import android.database.ContentObserver
 import android.os.Build
 import android.os.Bundle
-import android.os.Handler
-import android.os.Looper
-import android.provider.MediaStore
-import android.net.Uri
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
@@ -23,16 +18,6 @@ import kotlinx.coroutines.flow.map
 
 class MainActivity : ComponentActivity() {
     private val playerViewModel: PlayerViewModel by viewModels()
-    private var hasResumedBefore = false
-    private val libraryRescanHandler = Handler(Looper.getMainLooper())
-    private val libraryRescan = Runnable { playerViewModel.loadLibrary(force = true) }
-    private val libraryObserver = object : ContentObserver(libraryRescanHandler) {
-        override fun onChange(selfChange: Boolean, uri: Uri?) {
-            libraryRescanHandler.removeCallbacks(libraryRescan)
-            libraryRescanHandler.postDelayed(libraryRescan, LIBRARY_RESCAN_DELAY_MS)
-        }
-    }
-
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
@@ -65,23 +50,8 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
-        playerViewModel.loadLibrary(force = hasResumedBefore)
-        hasResumedBefore = true
-    }
-
-    override fun onStart() {
-        super.onStart()
-        contentResolver.registerContentObserver(
-            MediaStore.Audio.Media.EXTERNAL_CONTENT_URI,
-            true,
-            libraryObserver
-        )
-    }
-
-    override fun onStop() {
-        libraryRescanHandler.removeCallbacks(libraryRescan)
-        contentResolver.unregisterContentObserver(libraryObserver)
-        super.onStop()
+        // Uses the saved library; MediaStore is only rescanned when the user taps Actualizar.
+        playerViewModel.loadLibrary()
     }
 
     override fun onDestroy() {
@@ -89,7 +59,4 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
     }
 
-    private companion object {
-        const val LIBRARY_RESCAN_DELAY_MS = 900L
-    }
 }
