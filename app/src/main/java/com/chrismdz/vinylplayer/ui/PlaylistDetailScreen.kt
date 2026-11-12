@@ -1,9 +1,14 @@
 package com.chrismdz.vinylplayer.ui
 
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.tween
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.gestures.detectDragGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -34,6 +39,7 @@ import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.MusicNote
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QueueMusic
 import androidx.compose.material.icons.filled.RemoveCircleOutline
@@ -47,6 +53,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedTextField
+import androidx.compose.material3.SmallFloatingActionButton
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -57,10 +64,10 @@ import androidx.compose.ui.layout.positionInParent
 import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.derivedStateOf
-import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -71,8 +78,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
@@ -83,8 +88,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
-import androidx.compose.ui.zIndex
 import com.chrismdz.vinylplayer.data.MusicFile
+import kotlinx.coroutines.launch
 import com.chrismdz.vinylplayer.data.Playlist
 
 private val UnavailableColor = VinylPalette.Danger
@@ -215,6 +220,18 @@ internal fun PlaylistDetailContent(
     val collapsed by remember {
         derivedStateOf { listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > actionsTopPx }
     }
+    // LazyColumn index of the playing track (header is item 0). Null when it isn't in the visible entries.
+    val playingListIndex = remember(visibleEntries, currentUri) {
+        visibleEntries.indexOfFirst { it.value.uri == currentUri }.takeIf { currentUri != null && it >= 0 }?.plus(1)
+    }
+    // The locate button only shows while the playing row is completely off screen.
+    val showLocate by remember(playingListIndex) {
+        derivedStateOf {
+            val target = playingListIndex ?: return@derivedStateOf false
+            listState.layoutInfo.visibleItemsInfo.none { it.index == target }
+        }
+    }
+    val scope = rememberCoroutineScope()
 
     Box(Modifier.fillMaxSize()) {
     LazyColumn(state = listState, modifier = Modifier.fillMaxSize(), contentPadding = PaddingValues(bottom = 12.dp)) {
@@ -284,6 +301,27 @@ internal fun PlaylistDetailContent(
         }
     }
     FastScrollbar(listState = listState, modifier = Modifier.align(Alignment.CenterEnd))
+    AnimatedVisibility(
+        visible = showLocate,
+        modifier = Modifier.align(Alignment.BottomEnd).padding(end = 24.dp, bottom = 20.dp),
+        enter = fadeIn(tween(180)) + scaleIn(tween(220), initialScale = 0.6f),
+        exit = fadeOut(tween(140)) + scaleOut(tween(180), targetScale = 0.6f)
+    ) {
+        SmallFloatingActionButton(
+            onClick = {
+                val target = playingListIndex ?: return@SmallFloatingActionButton
+                scope.launch {
+                    // Lands the row about a third down the viewport so it isn't hidden under the pinned bar.
+                    val offset = -listState.layoutInfo.viewportSize.height / 3
+                    listState.animateScrollToItem(target, offset)
+                }
+            },
+            containerColor = MaterialTheme.colorScheme.primary,
+            contentColor = MaterialTheme.colorScheme.onPrimary
+        ) {
+            Icon(Icons.Default.MyLocation, contentDescription = "Ir a la canción en reproducción")
+        }
+    }
     CollapsedDetailBar(
         visible = collapsed,
         title = playlist.name,
@@ -375,9 +413,12 @@ private fun PlaylistEditDialog(
     var name by remember(playlist) { mutableStateOf(playlist.name) }
     var error by remember { mutableStateOf<String?>(null) }
     var confirmDiscard by remember { mutableStateOf(false) }
-    var draggingKey by remember { mutableStateOf<Int?>(null) }
-    var dragOffset by remember { mutableFloatStateOf(0f) }
     val listState = rememberLazyListState()
+    val reorder = rememberReorderableListState(
+        listState = listState,
+        onMove = { from, to -> if (from in rows.indices && to in rows.indices) rows.add(to, rows.removeAt(from)) },
+        indexOf = { key -> rows.indexOfFirst { it.key == key } }
+    )
     val changed = name.trim() != playlist.name || rows.map { it.uri } != playlist.songUris
     val close = { if (changed) confirmDiscard = true else onDismiss() }
 
@@ -402,20 +443,22 @@ private fun PlaylistEditDialog(
                     modifier = Modifier.fillMaxWidth()
                 )
                 Text(
-                    "${rows.size} canciones · Arrastra ≡ para cambiar el orden",
+                    "${rows.size} canciones · Arrastra ≡ o mantén presionada una canción para cambiar el orden",
                     color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
                     fontSize = 12.sp,
                     modifier = Modifier.padding(vertical = 6.dp)
                 )
-                LazyColumn(state = listState, modifier = Modifier.weight(1f).fillMaxWidth()) {
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.weight(1f).fillMaxWidth().reorderable(reorder, handleWidth = 48.dp)
+                ) {
                     itemsIndexed(rows, key = { _, row -> row.key }) { _, row ->
                         val file = filesByUri[row.uri]
                         LaunchedEffect(file?.uri, file?.artwork) { if (file != null && file.artwork == null) onRequestArtwork(file) }
-                        val dragging = draggingKey == row.key
+                        val dragging = reorder.draggingKey == row.key
                         Row(
-                            Modifier.fillMaxWidth()
-                                .zIndex(if (dragging) 1f else 0f)
-                                .graphicsLayer { translationY = if (dragging) dragOffset else 0f }
+                            reorderableItem(reorder, row.key, RoundedCornerShape(8.dp))
+                                .fillMaxWidth()
                                 .background(if (dragging) MaterialTheme.colorScheme.surface else Color.Transparent, RoundedCornerShape(8.dp))
                                 .padding(vertical = 5.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -444,41 +487,8 @@ private fun PlaylistEditDialog(
                                 Icons.Default.DragHandle,
                                 "Arrastrar para reordenar",
                                 tint = if (dragging) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
-                                modifier = Modifier.size(48.dp).padding(12.dp).pointerInput(row.key) {
-                                    detectDragGestures(
-                                        onDragStart = { draggingKey = row.key; dragOffset = 0f },
-                                        onDragEnd = { draggingKey = null; dragOffset = 0f },
-                                        onDragCancel = { draggingKey = null; dragOffset = 0f }
-                                    ) { change, amount ->
-                                        change.consume()
-                                        dragOffset += amount.y
-                                        val layout = listState.layoutInfo
-                                        val current = layout.visibleItemsInfo.firstOrNull { it.key == row.key } ?: return@detectDragGestures
-                                        // Auto-scroll near the edges; the row stays under the finger.
-                                        val top = current.offset + dragOffset
-                                        val edge = 80f
-                                        val scroll = when {
-                                            top + current.size > layout.viewportEndOffset - edge -> 18f
-                                            top < layout.viewportStartOffset + edge -> -18f
-                                            else -> 0f
-                                        }
-                                        if (scroll != 0f) dragOffset += listState.dispatchRawDelta(scroll)
-                                        val index = rows.indexOfFirst { it.key == row.key }
-                                        if (dragOffset > 0 && index < rows.lastIndex) {
-                                            val next = layout.visibleItemsInfo.firstOrNull { it.key == rows[index + 1].key }
-                                            if (next != null && dragOffset > next.size / 2f) {
-                                                rows.add(index + 1, rows.removeAt(index))
-                                                dragOffset -= next.size
-                                            }
-                                        } else if (dragOffset < 0 && index > 0) {
-                                            val previous = layout.visibleItemsInfo.firstOrNull { it.key == rows[index - 1].key }
-                                            if (previous != null && -dragOffset > previous.size / 2f) {
-                                                rows.add(index - 1, rows.removeAt(index))
-                                                dragOffset += previous.size
-                                            }
-                                        }
-                                    }
-                                }
+                                // The drag itself is handled by Modifier.reorderable on the list (handle strip = 48.dp).
+                                modifier = Modifier.size(48.dp).padding(12.dp)
                             )
                         }
                     }

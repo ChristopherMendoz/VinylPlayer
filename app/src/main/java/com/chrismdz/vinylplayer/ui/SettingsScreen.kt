@@ -98,6 +98,7 @@ import androidx.lifecycle.compose.LifecycleEventEffect
 import com.chrismdz.vinylplayer.settings.AccentColor
 import com.chrismdz.vinylplayer.settings.AccentColorValue
 import com.chrismdz.vinylplayer.settings.AppSettings
+import com.chrismdz.vinylplayer.settings.CollectionViewMode
 import com.chrismdz.vinylplayer.settings.LibrarySortOrder
 import com.chrismdz.vinylplayer.settings.PlayerBackground
 import com.chrismdz.vinylplayer.settings.QueueAddBehavior
@@ -576,10 +577,22 @@ private fun LibrarySettings(
             ActionSetting("Actualizar biblioteca", "Vuelve a leer los archivos de audio permitidos.", if (loading) "Actualizando" else "Actualizar", onRefresh, enabled = !loading)
         }
     }
-    if (matches(query, "Orden predeterminado", "título", "artista", "álbum")) {
+    if (matches(query, "Orden predeterminado", "título", "artista", "álbum", "Vista", "cuadrícula", "lista", "artistas", "álbumes")) {
         SettingsGroup("Organización") {
-            SegmentedSetting("Orden predeterminado", "Se aplica a la lista de canciones.", LibrarySortOrder.entries, settings.librarySortOrder, { it.title }) {
-                onChange(settings.copy(librarySortOrder = it))
+            if (matches(query, "Orden predeterminado", "título", "artista", "álbum")) {
+                SegmentedSetting("Orden predeterminado", "Se aplica a la lista de canciones.", LibrarySortOrder.entries, settings.librarySortOrder, { it.title }) {
+                    onChange(settings.copy(librarySortOrder = it))
+                }
+            }
+            if (matches(query, "Vista", "cuadrícula", "lista", "álbumes", "álbum")) {
+                SegmentedSetting("Vista de álbumes", "También se cambia desde la pestaña Álbumes.", CollectionViewMode.entries, settings.albumViewMode, { it.title }) {
+                    onChange(settings.copy(albumViewMode = it))
+                }
+            }
+            if (matches(query, "Vista", "cuadrícula", "lista", "artistas", "artista")) {
+                SegmentedSetting("Vista de artistas", "También se cambia desde la pestaña Artistas.", CollectionViewMode.entries, settings.artistViewMode, { it.title }) {
+                    onChange(settings.copy(artistViewMode = it))
+                }
             }
         }
     }

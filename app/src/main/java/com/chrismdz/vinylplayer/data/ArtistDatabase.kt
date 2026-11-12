@@ -100,6 +100,10 @@ interface ArtistDao {
     @Query("UPDATE artists SET imageStatus = 'NOT_DOWNLOADED', imageError = NULL, imageRetryAfter = NULL WHERE imageStatus IN ('PENDING', 'DOWNLOADING')")
     suspend fun resetPendingArtistImageWork()
 
+    /** Lets artists rejected by the old "single exact match only" rule be looked up again right away. */
+    @Query("UPDATE artists SET imageStatus = 'NOT_DOWNLOADED', imageError = NULL, imageRetryAfter = NULL WHERE imageStatus = 'NOT_FOUND'")
+    suspend fun resetNotFoundArtistImages()
+
     @Insert(onConflict = OnConflictStrategy.IGNORE)
     suspend fun insertArtists(artists: List<ArtistEntity>)
 

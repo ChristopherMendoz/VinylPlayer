@@ -45,14 +45,22 @@ object ArtistImageStatus {
     const val ERROR = "ERROR"
 }
 
-/** Uses only one unambiguous exact-name Deezer result and picks its largest image field. */
+/**
+ * Deezer often lists several artists with the exact same name (homonyms and empty duplicate
+ * profiles), so among exact-name matches with a real picture it picks the one with most fans.
+ */
 class DeezerArtistImageProvider : ArtistImageProvider {
     override suspend fun findArtistImage(name: String): ArtistImageLookup {
         val endpoint = Uri.parse("https://api.deezer.com/search/artist")
             .buildUpon()
             .appendQueryParameter("q", name)
             .build()
+        DeezerRequestGate.waitForSlot()
         val json = getJson(endpoint.toString(), setOf("api.deezer.com"))
+        // Deezer answers over-quota requests with HTTP 200 and an error object instead of data.
+        json.optJSONObject("error")?.let { error ->
+            throw ArtistImageRequestException(if (error.optInt("code") == DEEZER_QUOTA_ERROR) "HTTP_429" else "INVALID_RESPONSE")
+        }
         val results = json.optJSONArray("data") ?: throw ArtistImageRequestException("INVALID_RESPONSE")
         if (results.length() == 0) return ArtistImageLookup.NotFound
 
@@ -61,11 +69,15 @@ class DeezerArtistImageProvider : ArtistImageProvider {
             .mapNotNull(results::optJSONObject)
             .filter { normalizedArtistName(it.optString("name")) == wanted }
         if (matches.isEmpty()) return ArtistImageLookup.Ambiguous
-        if (matches.size != 1) return ArtistImageLookup.Ambiguous
 
-        val artist = matches.single()
-        val imageUrl = listOf("picture_xl", "picture_big", "picture_medium", "picture")
-            .firstNotNullOfOrNull { field -> artist.optString(field).takeIf(String::isNotBlank) }
+        val withPicture = matches.mapNotNull { candidate ->
+            listOf("picture_xl", "picture_big", "picture_medium", "picture")
+                .firstNotNullOfOrNull { field ->
+                    candidate.optString(field).takeIf { it.isNotBlank() && !it.isDeezerPlaceholder() }
+                }
+                ?.let { candidate to it }
+        }
+        val (artist, imageUrl) = withPicture.maxByOrNull { (candidate, _) -> candidate.optLong("nb_fan") }
             ?: return ArtistImageLookup.NotFound
         if (!isSecureUrl(imageUrl, setOf("dzcdn.net"))) return ArtistImageLookup.InvalidImage
 
@@ -229,6 +241,24 @@ class MusicBrainzWikidataArtistImageProvider(context: Context) : ArtistImageProv
 }
 
 private class ArtistImageRequestException(val code: String) : IOException(code)
+
+private const val DEEZER_QUOTA_ERROR = 4
+
+/** Profiles without a photo point at Deezer's generic artwork, whose path has an empty image hash. */
+private fun String.isDeezerPlaceholder(): Boolean = contains("/images/artist//")
+
+/** Deezer allows about 50 requests per 5 seconds; spacing them keeps a full library scan under it. */
+private object DeezerRequestGate {
+    private val mutex = Mutex()
+    private var lastRequestAt = 0L
+    private const val MIN_INTERVAL_MS = 150L
+
+    suspend fun waitForSlot() = mutex.withLock {
+        val waitMs = MIN_INTERVAL_MS - (System.currentTimeMillis() - lastRequestAt).coerceAtLeast(0L)
+        if (waitMs > 0L) delay(waitMs)
+        lastRequestAt = System.currentTimeMillis()
+    }
+}
 
 private object MusicBrainzRequestGate {
     private val mutex = Mutex()

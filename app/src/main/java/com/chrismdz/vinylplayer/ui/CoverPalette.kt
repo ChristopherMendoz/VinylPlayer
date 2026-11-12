@@ -39,7 +39,42 @@ object CoverPalette {
         return ranked.take(3).map(ColorBucket::color)
     }
 
-    fun fromBitmap(bitmap: Bitmap): List<Int> {
+    fun fromBitmap(bitmap: Bitmap): List<Int> = fromPixels(samplePixels(bitmap))
+
+    /**
+     * Picks the cover's most *characteristic* color plus a second, different-hue one, for the album
+     * backdrop. Unlike [fromPixels] (most frequent color), it favours saturated, mid-lightness
+     * colors so a red logo on a black sleeve yields red, not black. Grey covers still yield their
+     * grey. Returns null when there is nothing opaque to read.
+     */
+    fun ambienceFromPixels(pixels: IntArray): Pair<Int, Int>? {
+        val buckets = linkedMapOf<Int, ColorBucket>()
+        pixels.forEach { color ->
+            if (color ushr 24 < 0x80) return@forEach
+            val key = ((color shr 20 and 0xF) shl 8) or ((color shr 12 and 0xF) shl 4) or (color shr 4 and 0xF)
+            buckets.getOrPut(key) { ColorBucket() }.add(color)
+        }
+        if (buckets.isEmpty()) return null
+        data class Scored(val argb: Int, val hue: Float, val score: Float)
+        val scored = buckets.values.map { bucket ->
+            val argb = bucket.color()
+            val hsl = com.chrismdz.vinylplayer.settings.AccentColorValue.toHsl(argb)
+            // Vividness: saturated and away from pure black/white. The floor keeps grey covers usable.
+            val vividness = 0.12f + hsl.saturation * (1f - kotlin.math.abs(hsl.lightness - 0.5f) * 1.6f).coerceAtLeast(0f)
+            Scored(argb, hsl.hue, bucket.count * vividness)
+        }.sortedByDescending { it.score }
+        val primary = scored.first()
+        val secondary = scored.drop(1).firstOrNull { candidate ->
+            val distance = kotlin.math.abs(candidate.hue - primary.hue).let { minOf(it, 360f - it) }
+            distance >= 28f && candidate.score >= primary.score * 0.18f
+        } ?: primary
+        return primary.argb to secondary.argb
+    }
+
+    fun ambienceFromBitmap(bitmap: Bitmap): Pair<Int, Int>? = ambienceFromPixels(samplePixels(bitmap))
+
+    /** About 32×32 evenly spaced pixels: enough for color statistics, cheap on any cover size. */
+    private fun samplePixels(bitmap: Bitmap): IntArray {
         val stepX = ((bitmap.width + 31) / 32).coerceAtLeast(1)
         val stepY = ((bitmap.height + 31) / 32).coerceAtLeast(1)
         val pixels = ArrayList<Int>(1_024)
@@ -52,6 +87,6 @@ object CoverPalette {
             }
             y += stepY
         }
-        return fromPixels(pixels.toIntArray())
+        return pixels.toIntArray()
     }
 }

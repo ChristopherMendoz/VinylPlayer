@@ -17,6 +17,8 @@ class SettingsPreferences(context: Context) {
         repeatMode = preferences.enumValue("repeat_mode", RepeatMode.OFF),
         shuffleEnabled = preferences.getBoolean("shuffle_enabled", false),
         librarySortOrder = preferences.enumValue("library_sort_order", LibrarySortOrder.TITLE),
+        albumViewMode = preferences.enumValue("album_view_mode", CollectionViewMode.GRID),
+        artistViewMode = preferences.enumValue("artist_view_mode", CollectionViewMode.GRID),
         keepQueueBetweenSessions = preferences.getBoolean("keep_queue_between_sessions", true),
         queueAddBehavior = preferences.enumValue("queue_add_behavior", QueueAddBehavior.ADD_TO_END),
         allowQueueDuplicates = preferences.getBoolean("allow_queue_duplicates", true),
@@ -46,6 +48,8 @@ class SettingsPreferences(context: Context) {
             .putString("repeat_mode", settings.repeatMode.name)
             .putBoolean("shuffle_enabled", settings.shuffleEnabled)
             .putString("library_sort_order", settings.librarySortOrder.name)
+            .putString("album_view_mode", settings.albumViewMode.name)
+            .putString("artist_view_mode", settings.artistViewMode.name)
             .putBoolean("keep_queue_between_sessions", settings.keepQueueBetweenSessions)
             .putString("queue_add_behavior", settings.queueAddBehavior.name)
             .putBoolean("allow_queue_duplicates", settings.allowQueueDuplicates)
@@ -102,7 +106,7 @@ class SettingsPreferences(context: Context) {
 
         private val RESETTABLE_KEYS = listOf(
             "theme_mode", "accent_color", "custom_accent_argb", "player_background", "tonearm_animation",
-            "resume_last_session", "auto_advance", "repeat_mode", "shuffle_enabled", "library_sort_order",
+            "resume_last_session", "auto_advance", "repeat_mode", "shuffle_enabled", "library_sort_order", "album_view_mode", "artist_view_mode",
             "keep_queue_between_sessions", "queue_add_behavior", "allow_queue_duplicates",
             "lyrics_enabled", "lyrics_translation_enabled", "translation_language",
             "lyrics_font_size_sp", "lyrics_bold_text", "lyrics_previous_lines", "lyrics_next_lines",

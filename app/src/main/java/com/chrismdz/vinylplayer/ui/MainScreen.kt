@@ -39,15 +39,14 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.horizontalScroll
-import androidx.compose.foundation.gestures.detectDragGesturesAfterLongPress
 import androidx.compose.foundation.gestures.detectVerticalDragGestures
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items as gridItems
+import com.chrismdz.vinylplayer.settings.CollectionViewMode
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.onSizeChanged
@@ -66,6 +65,22 @@ import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.GridView
+import androidx.compose.material.icons.filled.ViewList
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
+import androidx.compose.material.icons.filled.Album
+import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.ui.graphics.lerp
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.unit.Dp
 import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Favorite
 import androidx.compose.material.icons.filled.FavoriteBorder
@@ -106,6 +121,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.toMutableStateList
 import androidx.compose.runtime.key
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
@@ -261,13 +277,10 @@ fun MainScreen(viewModel: PlayerViewModel, onRequestAudioPermission: () -> Unit 
     val isAlbumDetail = currentView == MainView.LIBRARY && libraryTab == LibraryTab.ALBUMS && selectedAlbumName != null
     val isPlaylistDetail = currentView == MainView.LIBRARY && libraryTab == LibraryTab.PLAYLISTS && selectedPlaylistName != null
     val isArtistDetail = currentView == MainView.LIBRARY && libraryTab == LibraryTab.ARTISTS && selectedArtistId != null
-    val usesCoverPalette = (currentView == MainView.PLAYER && state.appSettings.playerBackground == PlayerBackground.COVER_COLORS) ||
-        isAlbumDetail
-    val activePaletteArtwork = when {
-        currentView == MainView.PLAYER && state.appSettings.playerBackground == PlayerBackground.COVER_COLORS -> state.musicFile?.artwork
-        currentView == MainView.LIBRARY -> selectedAlbumCover?.artwork
-        else -> null
-    }
+    val usesCoverPalette = currentView == MainView.PLAYER && state.appSettings.playerBackground == PlayerBackground.COVER_COLORS
+    val activePaletteArtwork = if (usesCoverPalette) state.musicFile?.artwork else null
+    // Album detail: per-album backdrop, analysed off the main thread, cached and cross-faded.
+    val albumAmbience = rememberAnimatedCoverAmbience(if (isAlbumDetail) selectedAlbumCover?.artwork else null)
     val paletteColors = remember(activePaletteArtwork) {
         activePaletteArtwork?.let(CoverPalette::fromBitmap)?.let(::paletteBackgroundColors).orEmpty()
     }
@@ -346,6 +359,12 @@ fun MainScreen(viewModel: PlayerViewModel, onRequestAudioPermission: () -> Unit 
                 if (currentView == MainView.SETTINGS ||
                     (currentView == MainView.PLAYER && state.appSettings.playerBackground == PlayerBackground.SOLID)
                 ) Modifier.background(MaterialTheme.colorScheme.background)
+                else if (isAlbumDetail) Modifier.coverAmbienceBackground(albumAmbience) {
+                    // The glow recedes a little as the track list scrolls over it.
+                    val scrolled = if (albumDetailListState.firstVisibleItemIndex > 0) 1f
+                    else albumDetailListState.firstVisibleItemScrollOffset / 900f
+                    1f - scrolled.coerceIn(0f, 1f) * 0.25f
+                }
                 else if (usesCoverPalette) Modifier.background(
                     Brush.verticalGradient(
                         if (paletteColors.isNotEmpty()) paletteColors
@@ -440,6 +459,12 @@ fun MainScreen(viewModel: PlayerViewModel, onRequestAudioPermission: () -> Unit 
                     },
                     onAlbumSelected = { selectedAlbumName = it },
                     onArtistSelected = { selectedArtistId = it },
+                    onOpenArtist = { artistId ->
+                        searchQuery = ""
+                        selectedAlbumName = null
+                        libraryTabName = LibraryTab.ARTISTS.name
+                        selectedArtistId = artistId
+                    },
                     onCreatePlaylist = viewModel::createPlaylist,
                     onRemoveFromPlaylistAt = viewModel::removeFromPlaylistAt,
                     onDeletePlaylist = viewModel::deletePlaylist,
@@ -461,6 +486,15 @@ fun MainScreen(viewModel: PlayerViewModel, onRequestAudioPermission: () -> Unit 
                     albumGridState = albumGridState,
                     artistGridState = artistGridState,
                     onRefresh = { viewModel.loadLibrary(force = true) },
+                    onToggleViewMode = { tab ->
+                        viewModel.updateAppSettings { settings ->
+                            when (tab) {
+                                LibraryTab.ALBUMS -> settings.copy(albumViewMode = settings.albumViewMode.toggled())
+                                LibraryTab.ARTISTS -> settings.copy(artistViewMode = settings.artistViewMode.toggled())
+                                else -> settings
+                            }
+                        }
+                    },
                     onRequestArtwork = viewModel::loadArtwork,
                     onRequestArtistImage = viewModel::loadArtistImage,
                     onOpenFile = {
@@ -735,6 +769,7 @@ private fun LibraryView(
     onSavePlaylist: (original: String, name: String, songUris: List<String>) -> String?,
     onAddSongsToPlaylist: (String, List<String>) -> Unit,
     onOpenAlbum: (String) -> Unit,
+    onOpenArtist: (artistId: String) -> Unit,
     onSkipPrevious: () -> Unit,
     onSkipNext: () -> Unit,
     onMore: (com.chrismdz.vinylplayer.data.MusicFile) -> Unit,
@@ -744,6 +779,7 @@ private fun LibraryView(
     listState: LazyListState,
     albumDetailListState: LazyListState,
     onRefresh: () -> Unit,
+    onToggleViewMode: (LibraryTab) -> Unit,
     onRequestArtwork: (com.chrismdz.vinylplayer.data.MusicFile) -> Unit,
     onRequestArtistImage: (ArtistCatalogItem) -> Unit,
     albumGridState: androidx.compose.foundation.lazy.grid.LazyGridState,
@@ -875,12 +911,29 @@ private fun LibraryView(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 style = MaterialTheme.typography.labelMedium
             )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+            val viewMode = when (tab) {
+                LibraryTab.ALBUMS -> state.appSettings.albumViewMode
+                LibraryTab.ARTISTS -> state.appSettings.artistViewMode
+                else -> null
+            }
+            if (viewMode != null) {
+                IconButton(onClick = { onToggleViewMode(tab) }) {
+                    // Shows the layout you'll switch to.
+                    if (viewMode == CollectionViewMode.GRID) {
+                        Icon(Icons.Default.ViewList, "Ver como lista", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    } else {
+                        Icon(Icons.Default.GridView, "Ver como cuadrícula", tint = MaterialTheme.colorScheme.onSurfaceVariant)
+                    }
+                }
+            }
             IconButton(onClick = onRefresh, enabled = !state.isLibraryLoading) {
                 if (state.isLibraryLoading) {
                     CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.primary)
                 } else {
                     Icon(Icons.Default.Refresh, "Actualizar biblioteca", tint = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
+            }
             }
         }
         if (tab == LibraryTab.ARTISTS && state.artistCatalogErrorMessage != null) {
@@ -954,6 +1007,7 @@ private fun LibraryView(
                     LibraryTab.ALBUMS -> if (selectedAlbumName == null) {
                         AlbumGrid(
                             groups = albums,
+                            viewMode = state.appSettings.albumViewMode,
                             gridState = albumGridState,
                             artworkPreferences = albumArtworkPreferences,
                             onRequestArtwork = onRequestArtwork,
@@ -977,12 +1031,20 @@ private fun LibraryView(
                             selectedAlbumArtworkOverrideUri = albumArtworkOverrideUri,
                             onMore = onMore,
                             onBack = { onAlbumSelected(null) },
-                            isPlaying = state.isPlaying
+                            isPlaying = state.isPlaying,
+                            findArtistId = { name ->
+                                val identity = com.chrismdz.vinylplayer.data.artistIdentity(name)
+                                state.artistCatalog.firstOrNull {
+                                    com.chrismdz.vinylplayer.data.artistIdentity(it.name) == identity
+                                }?.artistId
+                            },
+                            onOpenArtist = onOpenArtist
                         )
                     }
                     LibraryTab.ARTISTS -> if (selectedArtistId == null) {
                         ArtistGrid(
                             artists = artists,
+                            viewMode = state.appSettings.artistViewMode,
                             images = state.artistImages,
                             gridState = artistGridState,
                             onRequestArtistImage = onRequestArtistImage,
@@ -1105,16 +1167,28 @@ private fun LibraryView(
         }
 
         state.musicFile?.let { current ->
+            // The album's chosen cover (it can differ from the song's own embedded art).
+            val currentAlbumCover = remember(state.library, current.album, albumArtworkOverrideUri) {
+                val tracks = state.library.filter { it.album == current.album }
+                if (tracks.isEmpty()) null else {
+                    val override = albumArtworkPreferences.getString(albumArtworkPreferenceKey(current.album, tracks), null)
+                    chooseAlbumCoverTrack(tracks, override) { it.uri.toString() }
+                }
+            }
+            LaunchedEffect(currentAlbumCover?.uri, currentAlbumCover?.artwork) {
+                if (currentAlbumCover != null && currentAlbumCover.artwork == null) onRequestArtwork(currentAlbumCover)
+            }
             Spacer(modifier = Modifier.height(12.dp))
             MiniPlayer(
+                albumArtwork = currentAlbumCover?.artwork ?: current.artwork,
                 file = current,
                 isPlaying = state.isPlaying,
                 onClick = onOpenCurrent,
                 onTogglePlayback = onTogglePlayback,
                 onFavorite = onFavorite,
                 isFavorite = isFavorite,
-                onSwipeLeft = onSkipPrevious,
-                onSwipeRight = onSkipNext
+                onSwipeLeft = onSkipNext,
+                onSwipeRight = onSkipPrevious
             )
         }
     }
@@ -1198,18 +1272,22 @@ private fun SongList(
 @Composable
 private fun AlbumGrid(
     groups: Map<String, List<com.chrismdz.vinylplayer.data.MusicFile>>,
+    viewMode: CollectionViewMode,
     gridState: androidx.compose.foundation.lazy.grid.LazyGridState,
     artworkPreferences: android.content.SharedPreferences,
     onRequestArtwork: (com.chrismdz.vinylplayer.data.MusicFile) -> Unit,
     onSelect: (String) -> Unit
 ) {
+    val asList = viewMode == CollectionViewMode.LIST
+    // One column for the list layout: same grid state, so scroll position, A–Z index and fast
+    // scrollbar keep working in both layouts.
     LazyVerticalGrid(
-        columns = GridCells.Fixed(2),
+        columns = GridCells.Fixed(if (asList) 1 else 2),
         state = gridState,
         modifier = Modifier.fillMaxSize(),
-        contentPadding = androidx.compose.foundation.layout.PaddingValues(end = 14.dp, bottom = 18.dp),
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
-        verticalArrangement = Arrangement.spacedBy(18.dp)
+        contentPadding = androidx.compose.foundation.layout.PaddingValues(top = 4.dp, end = 14.dp, bottom = 24.dp),
+        horizontalArrangement = Arrangement.spacedBy(18.dp),
+        verticalArrangement = Arrangement.spacedBy(if (asList) 2.dp else 22.dp)
     ) {
         gridItems(groups.entries.toList(), key = { it.key }) { entry ->
             val coverPreferenceKey = albumArtworkPreferenceKey(entry.key, entry.value)
@@ -1221,34 +1299,177 @@ private fun AlbumGrid(
             LaunchedEffect(cover?.uri, cover?.artwork) {
                 if (cover != null && cover.artwork == null) onRequestArtwork(cover)
             }
-            Column(Modifier.fillMaxWidth().clip(RoundedCornerShape(8.dp)).clickable { onSelect(entry.key) }) {
-                Box(
-                    Modifier.fillMaxWidth().aspectRatio(1f).shadow(10.dp, RoundedCornerShape(8.dp))
-                        .clip(RoundedCornerShape(8.dp)).background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.08f)),
-                    contentAlignment = Alignment.Center
-                ) {
-                    cover?.artwork?.let {
-                        Image(it.asImageBitmap(), null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
-                    } ?: Icon(Icons.Default.MusicNote, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(40.dp))
-                }
-                Text(
-                    entry.key,
-                    color = MaterialTheme.colorScheme.onSurface,
-                    fontWeight = FontWeight.SemiBold,
-                    fontSize = 15.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier.padding(top = 8.dp)
+            if (asList) {
+                AlbumListRow(
+                    title = entry.key,
+                    artist = albumArtist,
+                    trackCount = entry.value.size,
+                    artwork = cover?.artwork,
+                    onClick = { onSelect(entry.key) }
                 )
-                Text(
-                    "$albumArtist · ${entry.value.size} ${if (entry.value.size == 1) "canción" else "canciones"}",
-                    color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
-                    fontSize = 12.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis
+            } else {
+                AlbumCard(
+                    title = entry.key,
+                    artist = albumArtist,
+                    trackCount = entry.value.size,
+                    artwork = cover?.artwork,
+                    onClick = { onSelect(entry.key) }
                 )
             }
         }
+    }
+}
+
+/** One album in the collection: framed cover that sinks slightly under the finger, then title and artist. */
+@Composable
+private fun AlbumCard(
+    title: String,
+    artist: String,
+    trackCount: Int,
+    artwork: android.graphics.Bitmap?,
+    onClick: () -> Unit
+) {
+    val interaction = remember { MutableInteractionSource() }
+    val pressed by interaction.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        if (pressed) 0.95f else 1f,
+        spring(dampingRatio = Spring.DampingRatioMediumBouncy, stiffness = Spring.StiffnessMediumLow),
+        label = "album-card-press"
+    )
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .graphicsLayer { scaleX = scale; scaleY = scale }
+            .clickable(interactionSource = interaction, indication = null, onClick = onClick)
+    ) {
+        Box(
+            Modifier
+                .fillMaxWidth()
+                .aspectRatio(1f)
+                .shadow(14.dp, AlbumCoverShape)
+                .clip(AlbumCoverShape)
+        ) {
+            if (artwork != null) {
+                Image(artwork.asImageBitmap(), "Portada de $title", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            } else {
+                AlbumCoverPlaceholder(title, Modifier.fillMaxSize(), iconSize = 44.dp)
+            }
+            // Hairline edge so dark covers don't melt into the black background.
+            Box(Modifier.matchParentSize().border(1.dp, Color.White.copy(alpha = 0.07f), AlbumCoverShape))
+        }
+        Spacer(Modifier.height(10.dp))
+        Text(
+            title,
+            color = MaterialTheme.colorScheme.onSurface,
+            fontWeight = FontWeight.SemiBold,
+            fontSize = 15.sp,
+            lineHeight = 19.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis
+        )
+        Text(
+            artist,
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.66f),
+            fontSize = 13.sp,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+            modifier = Modifier.padding(top = 2.dp)
+        )
+        Text(
+            if (trackCount == 1) "1 canción" else "$trackCount canciones",
+            color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.42f),
+            fontSize = 12.sp,
+            maxLines = 1
+        )
+    }
+}
+
+private val AlbumCoverShape = RoundedCornerShape(12.dp)
+
+/** List layout of an album: small framed cover, title, artist and track count. */
+@Composable
+private fun AlbumListRow(
+    title: String,
+    artist: String,
+    trackCount: Int,
+    artwork: android.graphics.Bitmap?,
+    onClick: () -> Unit
+) {
+    CollectionListRow(
+        title = title,
+        subtitle = "$artist · " + if (trackCount == 1) "1 canción" else "$trackCount canciones",
+        onClick = onClick
+    ) {
+        Box(Modifier.size(58.dp).shadow(6.dp, AlbumListCoverShape).clip(AlbumListCoverShape)) {
+            if (artwork != null) {
+                Image(artwork.asImageBitmap(), "Portada de $title", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
+            } else {
+                AlbumCoverPlaceholder(title, Modifier.fillMaxSize(), iconSize = 26.dp)
+            }
+            Box(Modifier.matchParentSize().border(1.dp, Color.White.copy(alpha = 0.07f), AlbumListCoverShape))
+        }
+    }
+}
+
+private val AlbumListCoverShape = RoundedCornerShape(8.dp)
+
+/** Shared row for the album and artist list layouts: leading image, two lines of text, chevron. */
+@Composable
+private fun CollectionListRow(
+    title: String,
+    subtitle: String,
+    onClick: () -> Unit,
+    leading: @Composable () -> Unit
+) {
+    Row(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 7.dp, horizontal = 4.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        leading()
+        Column(Modifier.weight(1f).padding(horizontal = 14.dp)) {
+            Text(
+                title,
+                color = MaterialTheme.colorScheme.onSurface,
+                fontWeight = FontWeight.SemiBold,
+                fontSize = 16.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+            Text(
+                subtitle,
+                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                fontSize = 13.sp,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(top = 2.dp)
+            )
+        }
+        Icon(Icons.Default.ChevronRight, null, tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.35f))
+    }
+}
+
+private fun CollectionViewMode.toggled(): CollectionViewMode =
+    if (this == CollectionViewMode.GRID) CollectionViewMode.LIST else CollectionViewMode.GRID
+
+/**
+ * Stand-in sleeve for albums without artwork: a dark two-tone gradient whose hue is derived from
+ * the album name (stable between launches), with a record icon, so the grid never shows gaps.
+ */
+@Composable
+private fun AlbumCoverPlaceholder(name: String, modifier: Modifier = Modifier, iconSize: Dp = 48.dp) {
+    val colors = remember(name) {
+        val hue = ((name.hashCode() % 360) + 360) % 360f
+        listOf(
+            Color(com.chrismdz.vinylplayer.settings.AccentColorValue.fromHsl(hue, 0.32f, 0.26f)),
+            Color(com.chrismdz.vinylplayer.settings.AccentColorValue.fromHsl(hue + 36f, 0.28f, 0.12f))
+        )
+    }
+    Box(modifier.background(Brush.linearGradient(colors)), contentAlignment = Alignment.Center) {
+        Icon(Icons.Default.Album, null, tint = Color.White.copy(alpha = 0.55f), modifier = Modifier.size(iconSize))
     }
 }
 
@@ -1266,13 +1487,18 @@ private fun AlbumDetailContent(
     selectedAlbumArtworkOverrideUri: String?,
     onMore: (MusicFile) -> Unit,
     onBack: () -> Unit,
-    isPlaying: Boolean = false
+    isPlaying: Boolean = false,
+    /** Library artist id for a credited name, or null when that artist has no profile. */
+    findArtistId: (String) -> String? = { null },
+    onOpenArtist: (artistId: String) -> Unit = {}
 ) {
     var titleBottomPx by remember { mutableStateOf(Int.MAX_VALUE) }
     val collapsed by remember {
         derivedStateOf { listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > titleBottomPx }
     }
     val totalMinutes = remember(files) { files.sumOf { it.durationMs.coerceAtLeast(0) } / 60_000 }
+    val durationText = if (totalMinutes >= 60) "${totalMinutes / 60} h ${totalMinutes % 60} min" else "$totalMinutes min"
+    val countText = if (files.size == 1) "1 canción" else "${files.size} canciones"
     val albumArtists = remember(files) {
         consolidateAlbumArtists(files.map(MusicFile::artist))
     }
@@ -1283,9 +1509,13 @@ private fun AlbumDetailContent(
     val featuringText = "Featuring · ${albumArtists.collaborators.joinToString(", ")}"
     var featuringExpanded by remember(name, featuringText) { mutableStateOf(false) }
     var showAlbumArtworkPicker by remember(name) { mutableStateOf(false) }
-    val palette = remember(cover?.artwork) { cover?.artwork?.let(CoverPalette::fromBitmap).orEmpty() }
-    val accent = readableAlbumAccent(palette.firstOrNull())
-    val playForeground = Color(AccentColorValue.highContrastForeground(accent.toArgb(), Color.Black.toArgb()))
+    // Same cached, animated colors as the screen backdrop (see AlbumAmbience.kt).
+    val ambience = rememberAnimatedCoverAmbience(cover?.artwork)
+    // Controls keep VinylPlayer's gold; the cover only sets the atmosphere around them.
+    val accent = MaterialTheme.colorScheme.primary
+    // Cover and title ease in when an album opens.
+    val appear = remember(name) { Animatable(0f) }
+    LaunchedEffect(name) { appear.animateTo(1f, tween(durationMillis = 460, easing = FastOutSlowInEasing)) }
     LaunchedEffect(cover?.uri, cover?.artwork) {
         if (cover != null && cover.artwork == null) onRequestArtwork(cover)
     }
@@ -1294,97 +1524,168 @@ private fun AlbumDetailContent(
     LazyColumn(
         state = listState,
         modifier = Modifier.fillMaxSize(),
-        contentPadding = PaddingValues(bottom = 12.dp)
+        contentPadding = PaddingValues(bottom = 16.dp)
     ) {
         item(key = "album-detail-$name") {
             Column(Modifier.fillMaxWidth().padding(horizontal = 6.dp)) {
                 IconButton(onClick = onBack, modifier = Modifier.offset(x = (-12).dp)) {
                     Icon(Icons.Default.ArrowBack, "Atrás", tint = Color.White)
                 }
-                BoxWithConstraints(Modifier.fillMaxWidth().padding(top = 2.dp)) {
-                    val coverSide = minOf(maxWidth * 0.76f, 340.dp)
+                BoxWithConstraints(Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                    val coverSide = minOf(maxWidth * 0.78f, 340.dp)
                     Box(
                         modifier = Modifier
                             .size(coverSide)
                             .align(Alignment.Center)
-                            .shadow(18.dp, RoundedCornerShape(8.dp))
-                            .clip(RoundedCornerShape(8.dp)),
+                            .graphicsLayer {
+                                // Entrance, then a gentle parallax shrink as the tracks scroll over it.
+                                val scrolled = if (listState.firstVisibleItemIndex > 0) 1f
+                                else (listState.firstVisibleItemScrollOffset / coverSide.toPx()).coerceIn(0f, 1f)
+                                val scale = (0.9f + 0.1f * appear.value) * (1f - 0.1f * scrolled)
+                                scaleX = scale
+                                scaleY = scale
+                                alpha = appear.value * (1f - 0.4f * scrolled)
+                                translationY = (1f - appear.value) * 28.dp.toPx() + listState.firstVisibleItemScrollOffset * 0.3f * (1f - scrolled)
+                            }
+                            // Colored shadow: the cover seems to glow with its own light.
+                            .shadow(30.dp, AlbumDetailCoverShape, ambientColor = ambience.primary, spotColor = ambience.primary)
+                            .clip(AlbumDetailCoverShape),
                         contentAlignment = Alignment.Center
                     ) {
                         if (cover?.artwork != null) {
                             Image(cover.artwork.asImageBitmap(), "Portada del álbum $name", Modifier.fillMaxSize(), contentScale = ContentScale.Crop)
                         } else {
-                            Box(Modifier.fillMaxSize().background(Color.White.copy(alpha = 0.12f)), contentAlignment = Alignment.Center) {
-                                Icon(Icons.Default.MusicNote, null, tint = Color.White.copy(alpha = 0.8f), modifier = Modifier.size(54.dp))
+                            AlbumCoverPlaceholder(name, Modifier.fillMaxSize(), iconSize = 72.dp)
+                        }
+                        Box(Modifier.matchParentSize().border(1.dp, Color.White.copy(alpha = 0.08f), AlbumDetailCoverShape))
+                    }
+                }
+                Spacer(Modifier.height(26.dp))
+                Column(Modifier.fillMaxWidth().graphicsLayer {
+                    alpha = appear.value
+                    translationY = (1f - appear.value) * 16.dp.toPx()
+                }) {
+                    Text(
+                        "ÁLBUM",
+                        color = accent,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 2.2.sp
+                    )
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        name,
+                        modifier = Modifier.fillMaxWidth()
+                            .onGloballyPositioned { titleBottomPx = (it.positionInParent().y + it.size.height).toInt() }
+                            .clickable { albumTitleExpanded = !albumTitleExpanded },
+                        color = Color.White,
+                        fontSize = 30.sp,
+                        lineHeight = 34.sp,
+                        fontWeight = FontWeight.Bold,
+                        maxLines = if (albumTitleExpanded) Int.MAX_VALUE else 2,
+                        overflow = TextOverflow.Ellipsis
+                    )
+                    albumArtists.primaryArtist?.let { primaryArtist ->
+                        val primaryArtistId = remember(primaryArtist, findArtistId) { findArtistId(primaryArtist) }
+                        Row(
+                            Modifier
+                                .padding(top = 4.dp)
+                                .clip(RoundedCornerShape(8.dp))
+                                .then(
+                                    if (primaryArtistId != null) Modifier.clickable(onClickLabel = "Ver perfil de $primaryArtist") {
+                                        onOpenArtist(primaryArtistId)
+                                    } else Modifier
+                                )
+                                .padding(vertical = 2.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                primaryArtist,
+                                color = Color.White.copy(alpha = 0.92f),
+                                fontSize = 17.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                maxLines = 2,
+                                overflow = TextOverflow.Ellipsis,
+                                modifier = Modifier.weight(1f, fill = false)
+                            )
+                            // Chevron hints that the name opens the artist's profile.
+                            if (primaryArtistId != null) {
+                                Icon(
+                                    Icons.Default.ChevronRight,
+                                    null,
+                                    tint = Color.White.copy(alpha = 0.6f),
+                                    modifier = Modifier.size(20.dp)
+                                )
                             }
                         }
                     }
+                    if (albumArtists.collaborators.isNotEmpty()) {
+                        Text(
+                            featuringText,
+                            modifier = Modifier.fillMaxWidth().padding(top = 2.dp).clickable { featuringExpanded = !featuringExpanded },
+                            color = Color.White.copy(alpha = 0.72f),
+                            fontSize = 14.sp,
+                            maxLines = if (featuringExpanded) Int.MAX_VALUE else 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                    if (otherLeadArtists.isNotEmpty()) {
+                        Text(
+                            "Otros artistas principales · ${otherLeadArtists.joinToString(", ")}",
+                            color = Color.White.copy(alpha = 0.66f),
+                            fontSize = 13.sp,
+                            maxLines = 2,
+                            modifier = Modifier.padding(top = 2.dp)
+                        )
+                    }
+                    Row(
+                        Modifier.padding(top = 14.dp),
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        AlbumMetaChip(Icons.Default.MusicNote, countText)
+                        if (totalMinutes > 0) AlbumMetaChip(Icons.Default.Schedule, durationText)
+                    }
+                    Row(
+                        modifier = Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(Modifier.weight(1f)) {
+                            LibraryPill("Portada", icon = Icons.Default.LibraryMusic) { showAlbumArtworkPicker = true }
+                        }
+                        Box(
+                            Modifier
+                                .size(48.dp)
+                                .clip(CircleShape)
+                                .background(Color.White.copy(alpha = 0.08f))
+                                .border(1.dp, Color.White.copy(alpha = 0.18f), CircleShape)
+                                .clickable { onPlay(true) },
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(Icons.Default.Shuffle, "Reproducir álbum aleatoriamente", tint = accent, modifier = Modifier.size(24.dp))
+                        }
+                        Spacer(Modifier.width(14.dp))
+                        PlayButton(
+                            onClick = { onPlay(false) },
+                            size = 60.dp,
+                            contentDescription = "Reproducir álbum"
+                        )
+                    }
                 }
-                Spacer(Modifier.height(22.dp))
-                Text(
-                    name,
-                    modifier = Modifier.fillMaxWidth()
-                        .onGloballyPositioned { titleBottomPx = (it.positionInParent().y + it.size.height).toInt() }
-                        .clickable { albumTitleExpanded = !albumTitleExpanded },
-                    color = Color.White,
-                    fontSize = 29.sp,
-                    fontWeight = FontWeight.Bold,
-                    maxLines = if (albumTitleExpanded) Int.MAX_VALUE else 2,
-                    overflow = TextOverflow.Ellipsis
-                )
-                albumArtists.primaryArtist?.let { primaryArtist ->
-                    Text(
-                        primaryArtist,
-                        color = Color.White.copy(alpha = 0.9f),
-                        fontSize = 18.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 2
-                    )
-                }
-                if (albumArtists.collaborators.isNotEmpty()) {
-                    Text(
-                        featuringText,
-                        modifier = Modifier.fillMaxWidth().clickable { featuringExpanded = !featuringExpanded },
-                        color = Color.White.copy(alpha = 0.78f),
-                        fontSize = 15.sp,
-                        maxLines = if (featuringExpanded) Int.MAX_VALUE else 2,
-                        overflow = TextOverflow.Ellipsis
-                    )
-                }
-                if (otherLeadArtists.isNotEmpty()) {
-                    Text(
-                        "Otros artistas principales · ${otherLeadArtists.joinToString(", ")}",
-                        color = Color.White.copy(alpha = 0.72f),
-                        fontSize = 14.sp,
-                        maxLines = 2
-                    )
-                }
-                Spacer(Modifier.height(8.dp))
-                Text(
-                    "Álbum · ${files.size} ${if (files.size == 1) "canción" else "canciones"} · " +
-                        if (totalMinutes >= 60) "${totalMinutes / 60} h ${totalMinutes % 60} min" else "$totalMinutes min",
-                    color = Color.White.copy(alpha = 0.68f),
-                    fontSize = 14.sp
-                )
+                // Separates the album's identity from its track list.
                 Row(
-                    modifier = Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 8.dp),
+                    Modifier.fillMaxWidth().padding(top = 18.dp, bottom = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Row(Modifier.weight(1f)) {
-                        LibraryPill("Portada", icon = Icons.Default.LibraryMusic) { showAlbumArtworkPicker = true }
-                    }
-                    IconButton(onClick = { onPlay(true) }) {
-                        Icon(Icons.Default.Shuffle, "Reproducir álbum aleatoriamente", tint = accent, modifier = Modifier.size(26.dp))
-                    }
-                    Spacer(Modifier.width(8.dp))
-                    PlayButton(
-                        onClick = { onPlay(false) },
-                        containerColor = accent,
-                        contentColor = playForeground,
-                        contentDescription = "Reproducir álbum"
+                    Text(
+                        "Canciones",
+                        color = Color.White.copy(alpha = 0.85f),
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        letterSpacing = 0.6.sp
                     )
+                    Spacer(Modifier.width(12.dp))
+                    Box(Modifier.weight(1f).height(1.dp).background(Color.White.copy(alpha = 0.10f)))
                 }
-                Spacer(Modifier.height(6.dp))
             }
         }
         itemsIndexed(files, key = { _, file -> file.uri.toString() }) { index, file ->
@@ -1398,6 +1699,15 @@ private fun AlbumDetailContent(
                 onMore = { onMore(file) }
             )
         }
+        if (files.isNotEmpty()) item(key = "album-detail-footer-$name") {
+            Text(
+                "$countText · $durationText",
+                color = Color.White.copy(alpha = 0.42f),
+                fontSize = 12.sp,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.fillMaxWidth().padding(top = 14.dp, bottom = 6.dp)
+            )
+        }
     }
     FastScrollbar(listState, Modifier.align(Alignment.CenterEnd), minItems = 25)
     CollapsedDetailBar(
@@ -1405,7 +1715,8 @@ private fun AlbumDetailContent(
         title = name,
         onBack = onBack,
         modifier = Modifier.align(Alignment.TopCenter),
-        background = paletteBackgroundColors(palette).firstOrNull() ?: pinnedBarColor(),
+        // Darker take on the album color, so the pinned bar belongs to the same atmosphere.
+        background = lerp(ambience.primary, VinylPalette.Background, 0.35f),
         contentColor = Color.White
     )
     }
@@ -1421,6 +1732,21 @@ private fun AlbumDetailContent(
             },
             onDismiss = { showAlbumArtworkPicker = false }
         )
+    }
+}
+
+private val AlbumDetailCoverShape = RoundedCornerShape(14.dp)
+
+/** Small translucent capsule for album facts (track count, duration). */
+@Composable
+private fun AlbumMetaChip(icon: ImageVector, text: String) {
+    Row(
+        Modifier.clip(CircleShape).background(Color.White.copy(alpha = 0.10f)).padding(horizontal = 10.dp, vertical = 5.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        Icon(icon, null, tint = Color.White.copy(alpha = 0.75f), modifier = Modifier.size(14.dp))
+        Spacer(Modifier.width(5.dp))
+        Text(text, color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1)
     }
 }
 
@@ -1506,21 +1832,44 @@ private fun AlbumTrackRow(
     onMore: () -> Unit
 ) {
     Row(
-        modifier = Modifier.fillMaxWidth().clickable(onClick = onClick).padding(start = 8.dp, end = 0.dp, top = 9.dp, bottom = 9.dp),
+        modifier = Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .background(if (isCurrent) accent.copy(alpha = 0.10f) else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(start = 8.dp, end = 0.dp, top = 8.dp, bottom = 8.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
-        if (isCurrent) {
-            Box(Modifier.width(28.dp)) { NowPlayingBars(isPlaying, Modifier.size(16.dp), color = accent) }
-        } else {
-            Text((index + 1).toString(), color = Color.White.copy(alpha = 0.62f), fontSize = 15.sp, modifier = Modifier.width(28.dp))
+        Box(Modifier.width(32.dp)) {
+            if (isCurrent) {
+                NowPlayingBars(isPlaying, Modifier.size(16.dp), color = accent)
+            } else {
+                Text((index + 1).toString(), color = Color.White.copy(alpha = 0.5f), fontSize = 14.sp, fontWeight = FontWeight.Medium)
+            }
         }
         Column(Modifier.weight(1f)) {
-            Text(file.title, color = if (isCurrent) accent else Color.White, fontSize = 16.sp, fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal, maxLines = 1)
+            Text(
+                file.title,
+                color = if (isCurrent) accent else Color.White,
+                fontSize = 16.sp,
+                fontWeight = if (isCurrent) FontWeight.SemiBold else FontWeight.Normal,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
             Text(
                 file.artist,
-                color = if (isCurrent) accent else Color.White.copy(alpha = 0.68f),
+                color = if (isCurrent) accent.copy(alpha = 0.85f) else Color.White.copy(alpha = 0.6f),
                 fontSize = 13.sp,
-                maxLines = 1
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        if (file.durationMs > 0) {
+            Text(
+                formatTime(file.durationMs),
+                color = Color.White.copy(alpha = 0.45f),
+                fontSize = 12.sp,
+                modifier = Modifier.padding(start = 8.dp)
             )
         }
         IconButton(onClick = onMore) {
@@ -1532,22 +1881,36 @@ private fun AlbumTrackRow(
 @Composable
 private fun ArtistGrid(
     artists: List<ArtistCatalogItem>,
+    viewMode: CollectionViewMode,
     images: Map<String, android.graphics.Bitmap>,
     gridState: androidx.compose.foundation.lazy.grid.LazyGridState,
     onRequestArtistImage: (ArtistCatalogItem) -> Unit,
     onSelect: (ArtistCatalogItem) -> Unit
 ) {
+    val asList = viewMode == CollectionViewMode.LIST
     LazyVerticalGrid(
-        columns = GridCells.Fixed(2),
+        columns = GridCells.Fixed(if (asList) 1 else 2),
         state = gridState,
         modifier = Modifier.fillMaxSize(),
         contentPadding = androidx.compose.foundation.layout.PaddingValues(end = 14.dp, bottom = 18.dp),
         horizontalArrangement = Arrangement.spacedBy(16.dp),
-        verticalArrangement = Arrangement.spacedBy(18.dp)
+        verticalArrangement = Arrangement.spacedBy(if (asList) 2.dp else 18.dp)
     ) {
         gridItems(artists, key = { it.artistId }) { artist ->
             LaunchedEffect(artist.artistId, artist.imageStatus) { onRequestArtistImage(artist) }
-            Column(
+            if (asList) {
+                CollectionListRow(
+                    title = artist.name,
+                    subtitle = "Artista · " + if (artist.songCount == 1) "1 canción" else "${artist.songCount} canciones",
+                    onClick = { onSelect(artist) }
+                ) {
+                    ArtistImageTile(
+                        images[artist.artistId],
+                        Modifier.size(58.dp).shadow(6.dp, CircleShape).clip(CircleShape),
+                        artist.name
+                    )
+                }
+            } else Column(
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).clickable { onSelect(artist) }.padding(vertical = 4.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
@@ -1862,9 +2225,12 @@ private fun MiniPlayer(
     onFavorite: () -> Unit,
     isFavorite: Boolean,
     onSwipeLeft: () -> Unit,
-    onSwipeRight: () -> Unit
+    onSwipeRight: () -> Unit,
+    /** Cover of the album the song belongs to (the album's chosen cover), falling back to the song's own. */
+    albumArtwork: android.graphics.Bitmap? = file.artwork
 ) {
-    val backgroundColor = remember(file.artwork) { miniPlayerBackgroundColor(file.artwork) }
+    // Same cached analysis as the album screens, cross-faded when the song (or album) changes.
+    val backgroundColor = rememberAnimatedMiniPlayerColor(albumArtwork ?: file.artwork)
     val foregroundColor = Color(
         AccentColorValue.highContrastForeground(backgroundColor.toArgb(), MaterialTheme.colorScheme.background.toArgb())
     )
@@ -2487,20 +2853,6 @@ private fun paletteBackgroundColors(palette: List<Int>): List<Color> {
         shade(combined, 0.36f),
         Color(0xFF090B0B)
     )
-}
-
-private fun readableAlbumAccent(argb: Int?): Color {
-    val source = argb?.let(::Color) ?: Color.White
-    val hsl = AccentColorValue.toHsl(source.toArgb())
-    if (hsl.lightness >= 0.72f) return source
-    return Color(AccentColorValue.fromHsl(hsl.hue, hsl.saturation, 0.72f))
-}
-
-private fun miniPlayerBackgroundColor(artwork: android.graphics.Bitmap?): Color {
-    val argb = artwork?.let(CoverPalette::fromBitmap)?.firstOrNull() ?: return Color(0xFF202020)
-    val hsl = AccentColorValue.toHsl(argb)
-    val saturation = if (hsl.saturation < 0.08f) 0f else hsl.saturation.coerceAtLeast(0.38f).coerceAtMost(0.92f)
-    return Color(AccentColorValue.fromHsl(hsl.hue, saturation, hsl.lightness.coerceIn(0.23f, 0.37f)))
 }
 
 private fun albumArtworkPreferenceKey(albumName: String, tracks: List<MusicFile>): String {
@@ -3126,10 +3478,34 @@ private fun QueueDialog(
     val currentEntry = queue.getOrNull(currentIndex)
     val upcoming = queue.drop((currentIndex + 1).coerceIn(0, queue.size))
     val queueListState = rememberLazyListState()
-    var draggingId by remember { mutableStateOf<String?>(null) }
-    var dropTargetId by remember { mutableStateOf<String?>(null) }
-    var dropAfterTarget by remember { mutableStateOf(false) }
-    var draggedOffsetPx by remember { mutableStateOf(0f) }
+    // Local copy reordered live while dragging; the player only receives the final move on drop.
+    val displayedUpcoming = remember { upcoming.toMutableStateList() }
+    val queueReorder = rememberReorderableListState(
+        listState = queueListState,
+        onMove = { from, to ->
+            if (from in displayedUpcoming.indices && to in displayedUpcoming.indices) {
+                displayedUpcoming.add(to, displayedUpcoming.removeAt(from))
+            }
+        },
+        indexOf = { key -> displayedUpcoming.indexOfFirst { it.id == key } },
+        onDragStopped = { key, completed ->
+            val id = key as? String
+            val newIndex = displayedUpcoming.indexOfFirst { it.id == id }
+            if (completed && id != null && newIndex >= 0 && newIndex != upcoming.indexOfFirst { it.id == id }) {
+                // Expressed as "insert before the entry that now follows it" (or at the end), which is
+                // what moveInQueue understands; the current song and its position are untouched.
+                val next = displayedUpcoming.getOrNull(newIndex + 1)
+                onMove(id, next?.id, next == null)
+            }
+        }
+    )
+    // Follow the real queue, except mid-drag: a refresh (artwork, song change) must not yank the row.
+    LaunchedEffect(upcoming, queueReorder.draggingKey) {
+        if (queueReorder.draggingKey == null && displayedUpcoming.toList() != upcoming) {
+            displayedUpcoming.clear()
+            displayedUpcoming.addAll(upcoming)
+        }
+    }
     var showQueueOptions by remember { mutableStateOf(false) }
     var confirmClear by remember { mutableStateOf(false) }
     var queueMessage by remember { mutableStateOf<String?>(null) }
@@ -3140,26 +3516,6 @@ private fun QueueDialog(
             queueMessage = null
         }
     }
-    LaunchedEffect(draggingId) {
-        while (draggingId != null) {
-            val visibleItems = queueListState.layoutInfo.visibleItemsInfo
-            val draggedItem = visibleItems.firstOrNull { it.key == draggingId }
-            if (draggedItem != null && visibleItems.isNotEmpty()) {
-                val center = draggedItem.offset + draggedItem.size / 2 + draggedOffsetPx.toInt()
-                val layout = queueListState.layoutInfo
-                val firstIndex = visibleItems.first().index
-                val lastIndex = visibleItems.last().index
-                when {
-                    center < layout.viewportStartOffset + 58 && firstIndex > 0 ->
-                        queueListState.animateScrollToItem(firstIndex - 1)
-                    center > layout.viewportEndOffset - 58 && lastIndex < upcoming.lastIndex ->
-                        queueListState.animateScrollToItem(lastIndex + 1)
-                }
-            }
-            delay(48)
-        }
-    }
-
     ModalBottomSheet(
         onDismissRequest = onDismiss,
         sheetState = sheetState,
@@ -3215,13 +3571,7 @@ private fun QueueDialog(
                 QueueRow(
                     entry = currentEntry,
                     isCurrent = true,
-                    allowReorder = false,
-                    isDragging = false,
-                    isDropTarget = false,
                     onSelect = { onSelect(currentEntry) },
-                    onDragStart = {},
-                    onDragOffset = {},
-                    onDragEnd = {},
                     onPlayNext = { onPlayNext(currentEntry); queueMessage = "Se reproducirá a continuación" },
                     onAddToQueue = { onAddToQueue(currentEntry); queueMessage = "Agregada al final de la fila" },
                     onRemove = { onRemove(currentEntry.id); queueMessage = "Quitada de la fila" },
@@ -3258,57 +3608,16 @@ private fun QueueDialog(
                 else -> {
                     LazyColumn(
                         state = queueListState,
-                        modifier = Modifier.fillMaxWidth().weight(1f),
+                        modifier = Modifier.fillMaxWidth().weight(1f).reorderable(queueReorder),
                         contentPadding = PaddingValues(bottom = 8.dp)
                     ) {
-                        items(upcoming, key = { it.id }) { entry ->
+                        items(displayedUpcoming, key = { it.id }) { entry ->
                             QueueRow(
                                 entry = entry,
                                 isCurrent = false,
-                                allowReorder = true,
-                                isDragging = entry.id == draggingId,
-                                isDropTarget = entry.id == dropTargetId,
+                                modifier = reorderableItem(queueReorder, entry.id),
+                                isDragging = entry.id == queueReorder.draggingKey,
                                 onSelect = { onSelect(entry) },
-                                onDragStart = {
-                                    draggingId = entry.id
-                                    dropTargetId = entry.id
-                                    dropAfterTarget = false
-                                    draggedOffsetPx = 0f
-                                },
-                                onDragOffset = { offset ->
-                                    draggedOffsetPx = offset
-                                    val visible = queueListState.layoutInfo.visibleItemsInfo
-                                    val dragged = visible.firstOrNull { it.key == entry.id }
-                                    if (dragged == null) {
-                                        dropTargetId = entry.id
-                                        dropAfterTarget = false
-                                    } else {
-                                        val center = dragged.offset + dragged.size / 2 + offset.toInt()
-                                        val target = visible
-                                            .filter { it.key != entry.id }
-                                            .minByOrNull { abs(it.offset + it.size / 2 - center) }
-                                        val lastVisible = visible.lastOrNull()
-                                        if (target != null && lastVisible?.index == upcoming.lastIndex && center > lastVisible.offset + lastVisible.size / 2) {
-                                            dropTargetId = null
-                                            dropAfterTarget = true
-                                        } else {
-                                            dropTargetId = target?.key as? String ?: entry.id
-                                            dropAfterTarget = target != null && center > target.offset + target.size / 2
-                                        }
-                                    }
-                                },
-                                onDragEnd = { completed ->
-                                    val movingId = draggingId
-                                    if (completed && movingId != null && (dropTargetId != movingId || dropAfterTarget) &&
-                                        (dropTargetId != null || dropAfterTarget)
-                                    ) {
-                                        onMove(movingId, dropTargetId, dropAfterTarget)
-                                    }
-                                    draggingId = null
-                                    dropTargetId = null
-                                    dropAfterTarget = false
-                                    draggedOffsetPx = 0f
-                                },
                                 onPlayNext = { onPlayNext(entry); queueMessage = "Se reproducirá a continuación" },
                                 onAddToQueue = { onAddToQueue(entry); queueMessage = "Agregada al final de la fila" },
                                 onRemove = { onRemove(entry.id); queueMessage = "Quitada de la fila" },
@@ -3372,48 +3681,22 @@ private fun QueueDialog(
 private fun QueueRow(
     entry: QueueEntry,
     isCurrent: Boolean,
-    allowReorder: Boolean = true,
     onSelect: () -> Unit,
-    isDragging: Boolean,
-    isDropTarget: Boolean,
-    onDragStart: () -> Unit,
-    onDragOffset: (Float) -> Unit,
-    onDragEnd: (Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+    isDragging: Boolean = false,
     onPlayNext: () -> Unit,
     onAddToQueue: () -> Unit,
     onRemove: () -> Unit,
     onInfo: () -> Unit
 ) {
     val file = entry.file
-    var dragDistance by remember(entry.id) { mutableStateOf(0f) }
     var showActions by remember(entry.id) { mutableStateOf(false) }
-    val rowScale by animateFloatAsState(if (isDragging) 1.035f else 1f, label = "queue-drag-scale")
+    // Long-press dragging, lift and scale come from the queue list (see ReorderableList.kt).
     Row(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .clip(RoundedCornerShape(12.dp))
-            .graphicsLayer { scaleX = rowScale; scaleY = rowScale }
-            .shadow(if (isDragging) 12.dp else 0.dp, RoundedCornerShape(12.dp))
-            .border(
-                width = if (isDropTarget) 2.dp else 0.dp,
-                color = if (isDropTarget) MaterialTheme.colorScheme.primary else Color.Transparent,
-                shape = RoundedCornerShape(12.dp)
-            )
             .background(if (isDragging) Color(0x665E4923) else if (isCurrent) Color(0x334CAF70) else Color.Transparent)
-            .then(
-                if (allowReorder) Modifier.pointerInput(entry.id) {
-                    detectDragGesturesAfterLongPress(
-                        onDragStart = { dragDistance = 0f; onDragStart() },
-                        onDragCancel = { dragDistance = 0f; onDragEnd(false) },
-                        onDragEnd = { dragDistance = 0f; onDragEnd(true) },
-                        onDrag = { change, amount ->
-                            change.consume()
-                            dragDistance += amount.y
-                            onDragOffset(dragDistance)
-                        }
-                    )
-                } else Modifier
-            )
             .clickable(onClick = onSelect)
             .padding(vertical = 8.dp),
         verticalAlignment = Alignment.CenterVertically

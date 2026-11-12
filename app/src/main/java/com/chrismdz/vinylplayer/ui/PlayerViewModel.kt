@@ -227,12 +227,16 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     val playlistImportState: StateFlow<PlaylistImportState> = _playlistImportState.asStateFlow()
 
     fun initialize() {
-        if (!preferences.getBoolean(LEGACY_ARTIST_IMAGE_PREFETCH_CLEANUP_KEY, false) &&
-            legacyArtistImageCleanupJob?.isActive != true
-        ) {
+        val needsPrefetchCleanup = !preferences.getBoolean(LEGACY_ARTIST_IMAGE_PREFETCH_CLEANUP_KEY, false)
+        val needsArtistMatchRetry = !preferences.getBoolean(ARTIST_IMAGE_MATCH_RETRY_KEY, false)
+        if ((needsPrefetchCleanup || needsArtistMatchRetry) && legacyArtistImageCleanupJob?.isActive != true) {
             legacyArtistImageCleanupJob = viewModelScope.launch(Dispatchers.IO) {
-                if (runCatching { artistImageWorkScheduler.cancelPendingPrefetch() }.isSuccess) {
+                if (needsPrefetchCleanup && runCatching { artistImageWorkScheduler.cancelPendingPrefetch() }.isSuccess) {
                     preferences.edit().putBoolean(LEGACY_ARTIST_IMAGE_PREFETCH_CLEANUP_KEY, true).apply()
+                }
+                // Artists skipped as "ambiguous" by the old Deezer matching were parked for 30 days; retry them once.
+                if (needsArtistMatchRetry && runCatching { database.artistDao().resetNotFoundArtistImages() }.isSuccess) {
+                    preferences.edit().putBoolean(ARTIST_IMAGE_MATCH_RETRY_KEY, true).apply()
                 }
             }
         }
@@ -1922,5 +1926,6 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         private const val POSITION_IDLE_INTERVAL_MS = 1_000L
         private const val POSITION_SAVE_INTERVAL_MS = 5_000L
         private const val LEGACY_ARTIST_IMAGE_PREFETCH_CLEANUP_KEY = "artist_image_prefetch_cleanup_complete"
+        private const val ARTIST_IMAGE_MATCH_RETRY_KEY = "artist_image_match_retry_v2"
     }
 }

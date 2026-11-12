@@ -35,6 +35,12 @@ enum class LibrarySortOrder(val title: String) {
     ALBUM("Álbum")
 }
 
+/** How the album and artist collections are laid out in the library. */
+enum class CollectionViewMode(val title: String) {
+    GRID("Cuadrícula"),
+    LIST("Lista")
+}
+
 enum class TranslationLanguage(val title: String, val code: String) {
     SPANISH("Español", "es"),
     ENGLISH("Inglés", "en"),
@@ -55,6 +61,8 @@ data class AppSettings(
     val repeatMode: RepeatMode = RepeatMode.OFF,
     val shuffleEnabled: Boolean = false,
     val librarySortOrder: LibrarySortOrder = LibrarySortOrder.TITLE,
+    val albumViewMode: CollectionViewMode = CollectionViewMode.GRID,
+    val artistViewMode: CollectionViewMode = CollectionViewMode.GRID,
     val keepQueueBetweenSessions: Boolean = true,
     val queueAddBehavior: QueueAddBehavior = QueueAddBehavior.ADD_TO_END,
     val allowQueueDuplicates: Boolean = true,
