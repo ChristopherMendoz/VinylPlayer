@@ -2556,7 +2556,8 @@ private fun PlayerView(
                 onNext = onNext,
                 onShuffle = onShuffle,
                 onRepeat = onRepeat,
-                onQueue = onQueue
+                onQueue = onQueue,
+                onShareLyrics = onShareLyrics
             )
         } else {
             var followLyrics by remember(file.uri) { mutableStateOf(true) }
@@ -2648,7 +2649,8 @@ private fun CoverPlayerContent(
     onNext: () -> Unit,
     onShuffle: () -> Unit,
     onRepeat: () -> Unit,
-    onQueue: () -> Unit
+    onQueue: () -> Unit,
+    onShareLyrics: () -> Unit = {}
 ) {
     Column(Modifier.fillMaxSize(), horizontalAlignment = Alignment.CenterHorizontally) {
         BoxWithConstraints(
@@ -2679,6 +2681,12 @@ private fun CoverPlayerContent(
                     maxLines = 1,
                     modifier = Modifier.padding(top = 2.dp).basicMarquee()
                 )
+            }
+            // "Compartir letra" from the cover view too, whenever the song's lyrics are available.
+            if (state.lyricsStatus == LyricsStatus.AVAILABLE && state.lyrics != null) {
+                IconButton(onClick = onShareLyrics, modifier = Modifier.size(48.dp)) {
+                    Icon(Icons.Default.Share, "Compartir letra", tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(24.dp))
+                }
             }
             IconButton(onClick = onFavorite, modifier = Modifier.size(48.dp)) {
                 Icon(

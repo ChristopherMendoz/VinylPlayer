@@ -39,16 +39,11 @@ import androidx.compose.material.icons.filled.Clear
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.RadioButtonUnchecked
 import androidx.compose.material.icons.filled.Share
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
-import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -76,7 +71,18 @@ import androidx.compose.ui.window.DialogProperties
 import androidx.core.content.ContextCompat
 import com.chrismdz.vinylplayer.data.Lyrics
 import com.chrismdz.vinylplayer.ui.LibraryPill
-import com.chrismdz.vinylplayer.ui.VinylPalette
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.runtime.mutableFloatStateOf
+import kotlin.math.roundToInt
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.unit.Dp
+import com.chrismdz.vinylplayer.ui.GroupedSurface
+import com.chrismdz.vinylplayer.ui.SectionLabel
+import com.chrismdz.vinylplayer.ui.VinylShapes
+import com.chrismdz.vinylplayer.ui.VinylSpacing
+import com.chrismdz.vinylplayer.ui.screenBackgroundBrush
 import kotlinx.coroutines.launch
 
 private enum class ShareStep { SELECT, CUSTOMIZE }
@@ -100,6 +106,9 @@ internal fun LyricsShareDialog(
     val selected = remember(lyrics) { mutableStateListOf<Int>() }
     var step by remember { mutableStateOf(ShareStep.SELECT) }
     var style by remember { mutableStateOf(LyricsCardStyle.CLASSIC) }
+    // 1 = automatic size for the number of lines; the user can make the lyrics smaller or bigger.
+    var textScale by remember { mutableFloatStateOf(1f) }
+    var font by remember { mutableStateOf(LyricsCardFont.STYLE) }
     // Recomputed for each cover, so another album's palette is never reused by mistake.
     val schemes by produceState(initialValue = LyricsCardPalette.fallback(), cover) {
         value = LyricsCardPalette.schemesFor(cover)
@@ -110,7 +119,9 @@ internal fun LyricsShareDialog(
         title = title,
         artist = artist,
         lines = selected.sorted().mapNotNull { lines.getOrNull(it) },
-        cover = cover
+        cover = cover,
+        textScale = textScale,
+        font = font
     )
     var busy by remember { mutableStateOf(false) }
 
@@ -154,10 +165,17 @@ internal fun LyricsShareDialog(
         onDismissRequest = { if (step == ShareStep.CUSTOMIZE) step = ShareStep.SELECT else onDismiss() },
         properties = DialogProperties(usePlatformDefaultWidth = false)
     ) {
-        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-            Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 16.dp)) {
+        // Same page treatment as the library and detail screens.
+        Box(Modifier.fillMaxSize().background(MaterialTheme.colorScheme.background).background(screenBackgroundBrush())) {
+            Column(
+                Modifier
+                    .fillMaxSize()
+                    .systemBarsPadding()
+                    .padding(horizontal = VinylSpacing.screenHorizontal, vertical = VinylSpacing.screenTop)
+            ) {
                 when (step) {
                     ShareStep.SELECT -> SelectStep(
+                        songLabel = "$title · $artist",
                         lines = lines,
                         selected = selected,
                         content = content,
@@ -178,10 +196,15 @@ internal fun LyricsShareDialog(
                         onNext = { step = ShareStep.CUSTOMIZE }
                     )
                     ShareStep.CUSTOMIZE -> CustomizeStep(
+                        songLabel = "$title · $artist",
                         content = content,
                         style = style,
                         schemes = schemes,
                         schemeIndex = schemeIndex.coerceIn(0, schemes.lastIndex),
+                        textScale = textScale,
+                        onTextScale = { textScale = it },
+                        font = font,
+                        onFont = { font = it },
                         busy = busy,
                         onBack = { step = ShareStep.SELECT },
                         onStyle = { style = it },
@@ -195,8 +218,89 @@ internal fun LyricsShareDialog(
     }
 }
 
+/** Header like the app's top bars: navigation icon, title with the song below, optional action. */
+@Composable
+private fun ShareHeader(
+    title: String,
+    subtitle: String,
+    navigationIcon: ImageVector,
+    navigationLabel: String,
+    onNavigate: () -> Unit,
+    action: (@Composable () -> Unit)? = null
+) {
+    Row(Modifier.fillMaxWidth().heightIn(min = 52.dp), verticalAlignment = Alignment.CenterVertically) {
+        IconButton(onClick = onNavigate, modifier = Modifier.padding(end = VinylSpacing.xxs)) {
+            Icon(navigationIcon, navigationLabel, tint = MaterialTheme.colorScheme.onSurface)
+        }
+        Column(Modifier.weight(1f)) {
+            Text(title, color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.titleLarge, maxLines = 1)
+            Text(
+                subtitle,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis
+            )
+        }
+        action?.invoke()
+    }
+}
+
+/** Accent pill used for the main action of each step (Siguiente / Compartir). */
+@Composable
+private fun AccentPillButton(
+    label: String,
+    icon: ImageVector?,
+    enabled: Boolean,
+    busy: Boolean = false,
+    modifier: Modifier = Modifier,
+    onClick: () -> Unit
+) {
+    val primary = MaterialTheme.colorScheme.primary
+    Row(
+        modifier
+            .heightIn(min = 44.dp)
+            .clip(CircleShape)
+            .background(if (enabled) primary else primary.copy(alpha = 0.3f))
+            .clickable(enabled = enabled && !busy, onClick = onClick)
+            .padding(horizontal = VinylSpacing.lg, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        val content = MaterialTheme.colorScheme.onPrimary
+        if (busy) {
+            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = content)
+            Spacer(Modifier.width(VinylSpacing.xs))
+        } else if (icon != null) {
+            Icon(icon, null, tint = content, modifier = Modifier.size(20.dp))
+            Spacer(Modifier.width(VinylSpacing.xs))
+        }
+        Text(label, color = content, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.Bold)
+    }
+}
+
+/** Neutral pill for secondary actions (Guardar). */
+@Composable
+private fun NeutralPillButton(label: String, icon: ImageVector, enabled: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Row(
+        modifier
+            .heightIn(min = 44.dp)
+            .clip(CircleShape)
+            .background(MaterialTheme.colorScheme.surfaceContainerHighest)
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = VinylSpacing.lg, vertical = 10.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.Center
+    ) {
+        Icon(icon, null, tint = MaterialTheme.colorScheme.onSurface, modifier = Modifier.size(20.dp))
+        Spacer(Modifier.width(VinylSpacing.xs))
+        Text(label, color = MaterialTheme.colorScheme.onSurface, style = MaterialTheme.typography.labelLarge, fontWeight = FontWeight.SemiBold)
+    }
+}
+
 @Composable
 private fun ColumnScope.SelectStep(
+    songLabel: String,
     lines: List<String?>,
     selected: List<Int>,
     content: LyricsCardContent,
@@ -206,67 +310,74 @@ private fun ColumnScope.SelectStep(
     onToggle: (Int) -> Unit,
     onNext: () -> Unit
 ) {
-    Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onClick = onClose) { Icon(Icons.Default.Clear, "Cerrar", tint = MaterialTheme.colorScheme.onSurface) }
-        Text(
-            "Compartir letra",
-            Modifier.weight(1f),
-            color = MaterialTheme.colorScheme.onSurface,
-            fontSize = 18.sp,
-            fontWeight = FontWeight.Bold
-        )
-        TextButton(onClick = onNext, enabled = selected.isNotEmpty()) {
-            Text("Siguiente", fontWeight = FontWeight.Bold)
-        }
-    }
-    // Live miniature of the card while choosing lines.
-    Row(
-        Modifier.fillMaxWidth().padding(vertical = 10.dp),
-        verticalAlignment = Alignment.CenterVertically
+    val accent = MaterialTheme.colorScheme.primary
+    ShareHeader(
+        title = "Compartir letra",
+        subtitle = songLabel,
+        navigationIcon = Icons.Default.Clear,
+        navigationLabel = "Cerrar",
+        onNavigate = onClose
     ) {
-        LyricsCardPreview(content, style, colors, Modifier.width(96.dp).aspectRatio(9f / 16f).shadow(8.dp, RoundedCornerShape(10.dp)))
-        Column(Modifier.weight(1f).padding(start = 16.dp)) {
-            Text(
-                "${selected.size}/$MAX_SHARED_LYRIC_LINES líneas",
-                color = if (selected.size >= MAX_SHARED_LYRIC_LINES) VinylPalette.Gold else MaterialTheme.colorScheme.onSurface,
-                fontSize = 20.sp,
-                fontWeight = FontWeight.Bold
-            )
-            Text(
-                "Toca las líneas que quieres en la tarjeta. Se mantienen en el orden de la canción.",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 13.sp
-            )
+        AccentPillButton("Siguiente", icon = null, enabled = selected.isNotEmpty(), onClick = onNext)
+    }
+    Spacer(Modifier.height(VinylSpacing.sm))
+    // Summary: live miniature of the card + how many lines are in it.
+    GroupedSurface {
+        Row(Modifier.padding(VinylSpacing.md), verticalAlignment = Alignment.CenterVertically) {
+            LyricsCardPreview(content, style, colors, Modifier.width(72.dp).aspectRatio(9f / 16f))
+            Column(Modifier.weight(1f).padding(start = VinylSpacing.md)) {
+                Box(
+                    Modifier
+                        .clip(CircleShape)
+                        .background(if (selected.isNotEmpty()) accent.copy(alpha = 0.16f) else MaterialTheme.colorScheme.surfaceContainerHighest)
+                        .padding(horizontal = VinylSpacing.sm, vertical = VinylSpacing.xxs)
+                ) {
+                    Text(
+                        "${selected.size} de $MAX_SHARED_LYRIC_LINES líneas",
+                        color = if (selected.isNotEmpty()) accent else MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.labelLarge,
+                        fontWeight = FontWeight.Bold
+                    )
+                }
+                Spacer(Modifier.height(VinylSpacing.xs))
+                Text(
+                    "Toca las líneas que quieres en la tarjeta. Se ordenan como en la canción.",
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.bodySmall
+                )
+            }
         }
     }
-    LazyColumn(Modifier.weight(1f).fillMaxWidth()) {
+    Spacer(Modifier.height(VinylSpacing.lg))
+    SectionLabel("Letra")
+    LazyColumn(Modifier.weight(1f).fillMaxWidth(), contentPadding = PaddingValues(bottom = VinylSpacing.md)) {
         itemsIndexed(lines) { index, line ->
             if (line == null) {
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(VinylSpacing.md))
             } else {
                 val isSelected = index in selected
                 Row(
                     Modifier
                         .fillMaxWidth()
                         .padding(vertical = 2.dp)
-                        .clip(RoundedCornerShape(10.dp))
-                        .background(if (isSelected) VinylPalette.Gold.copy(alpha = 0.16f) else Color.Transparent)
+                        .clip(VinylShapes.control)
+                        .background(if (isSelected) accent.copy(alpha = 0.14f) else Color.Transparent)
                         .clickable { onToggle(index) }
-                        .padding(horizontal = 12.dp, vertical = 10.dp),
+                        .padding(horizontal = VinylSpacing.sm, vertical = 10.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
                         line,
                         Modifier.weight(1f),
                         color = if (isSelected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.72f),
-                        fontSize = 17.sp,
+                        style = MaterialTheme.typography.bodyLarge,
                         fontWeight = if (isSelected) FontWeight.SemiBold else FontWeight.Normal
                     )
                     Icon(
                         if (isSelected) Icons.Default.CheckCircle else Icons.Default.RadioButtonUnchecked,
                         null,
-                        tint = if (isSelected) VinylPalette.Gold else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
-                        modifier = Modifier.padding(start = 12.dp).size(22.dp)
+                        tint = if (isSelected) accent else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.3f),
+                        modifier = Modifier.padding(start = VinylSpacing.sm).size(22.dp)
                     )
                 }
             }
@@ -274,12 +385,19 @@ private fun ColumnScope.SelectStep(
     }
 }
 
+private enum class CustomizePanel(val label: String) { STYLE("ESTILO"), FONT("FUENTE"), SIZE("TAMAÑO"), COLORS("COLORES") }
+
 @Composable
 private fun ColumnScope.CustomizeStep(
+    songLabel: String,
     content: LyricsCardContent,
     style: LyricsCardStyle,
     schemes: List<LyricsCardColors>,
     schemeIndex: Int,
+    textScale: Float,
+    onTextScale: (Float) -> Unit,
+    font: LyricsCardFont,
+    onFont: (LyricsCardFont) -> Unit,
     busy: Boolean,
     onBack: () -> Unit,
     onStyle: (LyricsCardStyle) -> Unit,
@@ -287,64 +405,115 @@ private fun ColumnScope.CustomizeStep(
     onSave: () -> Unit,
     onShare: () -> Unit
 ) {
-    Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-        IconButton(onClick = onBack) { Icon(Icons.Default.ArrowBack, "Volver a las líneas", tint = MaterialTheme.colorScheme.onSurface) }
-        Text("Personalizar", color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, fontWeight = FontWeight.Bold)
-    }
+    var panel by remember { mutableStateOf(CustomizePanel.STYLE) }
+    ShareHeader(
+        title = "Personalizar",
+        subtitle = songLabel,
+        navigationIcon = Icons.Default.ArrowBack,
+        navigationLabel = "Volver a las líneas",
+        onNavigate = onBack
+    )
     // Faithful preview: the exact drawing that will be exported, scaled to fit.
-    Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 12.dp), contentAlignment = Alignment.Center) {
+    Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = VinylSpacing.md), contentAlignment = Alignment.Center) {
         LyricsCardPreview(
             content, style, schemes[schemeIndex],
             Modifier.fillMaxHeight().aspectRatio(9f / 16f, matchHeightConstraintsFirst = true)
-                .shadow(16.dp, RoundedCornerShape(16.dp))
+                .shadow(16.dp, VinylShapes.group)
         )
     }
-    Text("Estilo", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
+    // One control panel at a time, picked with the same switcher as Portada / Letra.
     Row(
-        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(8.dp)
+        Modifier
+            .align(Alignment.CenterHorizontally)
+            .clip(RoundedCornerShape(24.dp))
+            .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f))
+            .padding(3.dp)
     ) {
-        LyricsCardStyle.entries.forEach { option ->
-            LibraryPill(option.label, selected = option == style) { onStyle(option) }
-        }
-    }
-    Text("Colores del álbum", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp, fontWeight = FontWeight.SemiBold)
-    Row(
-        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(vertical = 8.dp),
-        horizontalArrangement = Arrangement.spacedBy(14.dp)
-    ) {
-        schemes.forEachIndexed { index, scheme ->
-            ColorSwatch(scheme, selected = index == schemeIndex) { onScheme(index) }
-        }
-    }
-    Row(
-        Modifier.fillMaxWidth().padding(top = 6.dp, bottom = 12.dp),
-        horizontalArrangement = Arrangement.spacedBy(12.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        OutlinedButton(onClick = onSave, enabled = !busy, modifier = Modifier.weight(1f).heightIn(min = 50.dp)) {
-            Icon(Icons.Default.Download, null, modifier = Modifier.size(20.dp))
-            Spacer(Modifier.width(8.dp))
-            Text("Guardar")
-        }
-        Button(
-            onClick = onShare,
-            enabled = !busy,
-            modifier = Modifier.weight(1f).heightIn(min = 50.dp),
-            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
-        ) {
-            if (busy) {
-                CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = MaterialTheme.colorScheme.onPrimary)
-            } else {
-                Icon(Icons.Default.Share, null, modifier = Modifier.size(20.dp))
+        CustomizePanel.entries.forEach { option ->
+            val active = option == panel
+            Box(
+                Modifier
+                    .clip(RoundedCornerShape(21.dp))
+                    .background(if (active) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f) else Color.Transparent)
+                    .clickable { panel = option }
+                    .padding(horizontal = 14.dp, vertical = 9.dp)
+            ) {
+                Text(
+                    option.label,
+                    color = if (active) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
+                    style = MaterialTheme.typography.labelMedium,
+                    fontWeight = FontWeight.Bold
+                )
             }
-            Spacer(Modifier.width(8.dp))
-            Text("Compartir")
         }
+    }
+    Spacer(Modifier.height(VinylSpacing.sm))
+    GroupedSurface(Modifier.heightIn(min = 96.dp)) {
+        Box(Modifier.fillMaxWidth().heightIn(min = 96.dp).padding(vertical = VinylSpacing.sm), contentAlignment = Alignment.CenterStart) {
+            when (panel) {
+                CustomizePanel.STYLE -> PillRow {
+                    LyricsCardStyle.entries.forEach { option ->
+                        LibraryPill(option.label, selected = option == style) { onStyle(option) }
+                    }
+                }
+                CustomizePanel.FONT -> PillRow {
+                    LyricsCardFont.entries.forEach { option ->
+                        LibraryPill(option.label, selected = option == font) { onFont(option) }
+                    }
+                }
+                CustomizePanel.SIZE -> Column(Modifier.fillMaxWidth().padding(horizontal = VinylSpacing.md)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text(
+                            if (textScale == 1f) "Automático" else "${(textScale * 100).roundToInt()} %",
+                            color = MaterialTheme.colorScheme.onSurface,
+                            style = MaterialTheme.typography.labelLarge,
+                            modifier = Modifier.weight(1f)
+                        )
+                        LibraryPill("Auto", selected = textScale == 1f) { onTextScale(1f) }
+                    }
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("A", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp, fontWeight = FontWeight.Bold)
+                        Slider(
+                            value = textScale,
+                            onValueChange = { onTextScale((it * 20).roundToInt() / 20f) },
+                            valueRange = LyricsCardRenderer.MIN_TEXT_SCALE..LyricsCardRenderer.MAX_TEXT_SCALE,
+                            modifier = Modifier.weight(1f).padding(horizontal = VinylSpacing.sm),
+                            colors = SliderDefaults.colors(
+                                thumbColor = MaterialTheme.colorScheme.primary,
+                                activeTrackColor = MaterialTheme.colorScheme.primary
+                            )
+                        )
+                        Text("A", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 22.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+                CustomizePanel.COLORS -> PillRow(spacing = VinylSpacing.md) {
+                    schemes.forEachIndexed { index, scheme ->
+                        ColorSwatch(scheme, selected = index == schemeIndex) { onScheme(index) }
+                    }
+                }
+            }
+        }
+    }
+    Row(
+        Modifier.fillMaxWidth().padding(top = VinylSpacing.md),
+        horizontalArrangement = Arrangement.spacedBy(VinylSpacing.sm)
+    ) {
+        NeutralPillButton("Guardar", Icons.Default.Download, enabled = !busy, modifier = Modifier.weight(1f), onClick = onSave)
+        AccentPillButton("Compartir", Icons.Default.Share, enabled = true, busy = busy, modifier = Modifier.weight(1f), onClick = onShare)
     }
 }
 
-/** Small circle showing a color combination; the selected one gets a gold ring. */
+/** Horizontally scrolling row of choices inside a grouped panel. */
+@Composable
+private fun PillRow(spacing: Dp = VinylSpacing.xs, content: @Composable () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().horizontalScroll(rememberScrollState()).padding(horizontal = VinylSpacing.md),
+        horizontalArrangement = Arrangement.spacedBy(spacing),
+        verticalAlignment = Alignment.CenterVertically
+    ) { content() }
+}
+
+/** Small circle showing a color combination; the selected one gets an accent ring. */
 @Composable
 private fun ColorSwatch(scheme: LyricsCardColors, selected: Boolean, onClick: () -> Unit) {
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -356,16 +525,20 @@ private fun ColorSwatch(scheme: LyricsCardColors, selected: Boolean, onClick: ()
                 .size(44.dp)
                 .clip(CircleShape)
                 .then(fill)
-                .border(if (selected) 3.dp else 1.dp, if (selected) VinylPalette.Gold else Color.White.copy(alpha = 0.2f), CircleShape)
+                .border(
+                    if (selected) 3.dp else 1.dp,
+                    if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.2f),
+                    CircleShape
+                )
                 .clickable(onClick = onClick)
         )
         Text(
             scheme.label,
             color = if (selected) MaterialTheme.colorScheme.onSurface else MaterialTheme.colorScheme.onSurfaceVariant,
-            fontSize = 11.sp,
+            style = MaterialTheme.typography.labelSmall,
             maxLines = 1,
             overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(top = 4.dp)
+            modifier = Modifier.padding(top = VinylSpacing.xxs)
         )
     }
 }
@@ -378,7 +551,7 @@ private fun LyricsCardPreview(
     colors: LyricsCardColors,
     modifier: Modifier
 ) {
-    Canvas(modifier.clip(RoundedCornerShape(12.dp))) {
+    Canvas(modifier.clip(VinylShapes.control)) {
         drawIntoCanvas { canvas ->
             val native = canvas.nativeCanvas
             native.save()

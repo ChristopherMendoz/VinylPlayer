@@ -23,12 +23,43 @@ internal enum class LyricsCardStyle(val label: String) {
     EDITORIAL("Editorial")
 }
 
+/**
+ * Font for the lyrics on the card. [STYLE] keeps each style's own font (bold sans, serif for
+ * Editorial…); the others use Android's built-in families, so no font files are bundled.
+ */
+internal enum class LyricsCardFont(val label: String) {
+    STYLE("Del estilo"),
+    MODERN("Moderna"),
+    SERIF("Clásica"),
+    ITALIC("Elegante"),
+    CONDENSED("Condensada"),
+    LIGHT("Ligera"),
+    MONO("Máquina"),
+    CASUAL("Casual");
+
+    val typeface: Typeface? by lazy {
+        when (this) {
+            STYLE -> null
+            MODERN -> Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
+            SERIF -> Typeface.create(Typeface.SERIF, Typeface.BOLD)
+            ITALIC -> Typeface.create(Typeface.SERIF, Typeface.BOLD_ITALIC)
+            CONDENSED -> Typeface.create("sans-serif-condensed", Typeface.BOLD)
+            LIGHT -> Typeface.create("sans-serif-light", Typeface.NORMAL)
+            MONO -> Typeface.create(Typeface.MONOSPACE, Typeface.BOLD)
+            CASUAL -> Typeface.create("casual", Typeface.BOLD)
+        }
+    }
+}
+
 internal data class LyricsCardContent(
     val title: String,
     val artist: String,
     /** Selected lyric lines, in song order. */
     val lines: List<String>,
-    val cover: Bitmap?
+    val cover: Bitmap?,
+    /** User's text size choice (1 = automatic size); the fit still shrinks text that doesn't fit. */
+    val textScale: Float = 1f,
+    val font: LyricsCardFont = LyricsCardFont.STYLE
 )
 
 /**
@@ -39,6 +70,8 @@ internal data class LyricsCardContent(
 internal object LyricsCardRenderer {
     const val WIDTH = 1080
     const val HEIGHT = 1920
+    const val MIN_TEXT_SCALE = 0.6f
+    const val MAX_TEXT_SCALE = 1.3f
     private const val W = WIDTH.toFloat()
     private const val H = HEIGHT.toFloat()
     private const val MARGIN = 96f
@@ -72,8 +105,8 @@ internal object LyricsCardRenderer {
         val textWidth = (right - left - pad * 2).toInt()
         val lyrics = fitLyrics(
             content.lines, textWidth, maxHeight = H * 0.52f,
-            maxSize = 96f * sizeFactor(content.lines), minSize = 40f,
-            typeface = sansBold, color = colors.text, align = Layout.Alignment.ALIGN_NORMAL
+            maxSize = 96f * sizeFactor(content), minSize = minSizeFor(content, 40f),
+            typeface = content.font.typeface ?: sansBold, color = colors.text, align = Layout.Alignment.ALIGN_NORMAL
         )
         val cardHeight = pad + coverSize + 64f + lyrics.height + 72f + 40f + pad
         val top = (H - cardHeight) / 2f
@@ -110,8 +143,8 @@ internal object LyricsCardRenderer {
         val areaBottom = H - MARGIN - 110f
         val lyrics = fitLyrics(
             content.lines, (W - MARGIN * 2).toInt(), maxHeight = areaBottom - areaTop,
-            maxSize = 108f * sizeFactor(content.lines), minSize = 44f,
-            typeface = sansBold, color = colors.text, align = Layout.Alignment.ALIGN_NORMAL
+            maxSize = 108f * sizeFactor(content), minSize = minSizeFor(content, 44f),
+            typeface = content.font.typeface ?: sansBold, color = colors.text, align = Layout.Alignment.ALIGN_NORMAL
         )
         drawLayout(canvas, lyrics, MARGIN, areaTop + (areaBottom - areaTop - lyrics.height) / 2f)
         drawBrand(canvas, colors, MARGIN, H - MARGIN, Paint.Align.LEFT)
@@ -123,8 +156,8 @@ internal object LyricsCardRenderer {
         val sideMargin = 140f
         val lyrics = fitLyrics(
             content.lines, (W - sideMargin * 2).toInt(), maxHeight = H * 0.6f,
-            maxSize = 92f * sizeFactor(content.lines), minSize = 40f,
-            typeface = sansMedium, color = colors.text, align = Layout.Alignment.ALIGN_CENTER,
+            maxSize = 92f * sizeFactor(content), minSize = minSizeFor(content, 40f),
+            typeface = content.font.typeface ?: sansMedium, color = colors.text, align = Layout.Alignment.ALIGN_CENTER,
             spacing = 1.28f
         )
         val top = (H - lyrics.height) / 2f - 30f
@@ -159,8 +192,8 @@ internal object LyricsCardRenderer {
         val areaBottom = H - MARGIN - 100f
         val lyrics = fitLyrics(
             content.lines, (W - MARGIN * 2).toInt(), maxHeight = areaBottom - areaTop,
-            maxSize = 82f * sizeFactor(content.lines), minSize = 36f,
-            typeface = sansBold, color = light, align = Layout.Alignment.ALIGN_CENTER
+            maxSize = 82f * sizeFactor(content), minSize = minSizeFor(content, 36f),
+            typeface = content.font.typeface ?: sansBold, color = light, align = Layout.Alignment.ALIGN_CENTER
         )
         drawLayout(canvas, lyrics, MARGIN, areaTop + (areaBottom - areaTop - lyrics.height) / 2f)
         drawBrand(canvas, colors.copy(secondaryText = lightSecondary), W / 2f, H - MARGIN, Paint.Align.CENTER)
@@ -181,8 +214,8 @@ internal object LyricsCardRenderer {
         val areaBottom = H - MARGIN - 290f
         val lyrics = fitLyrics(
             content.lines, (W - MARGIN - textLeft).toInt(), maxHeight = areaBottom - areaTop,
-            maxSize = 102f * sizeFactor(content.lines), minSize = 44f,
-            typeface = serifBold, color = colors.text, align = Layout.Alignment.ALIGN_NORMAL,
+            maxSize = 102f * sizeFactor(content), minSize = minSizeFor(content, 44f),
+            typeface = content.font.typeface ?: serifBold, color = colors.text, align = Layout.Alignment.ALIGN_NORMAL,
             spacing = 1.14f
         )
         canvas.drawRoundRect(RectF(MARGIN, areaTop + 8f, MARGIN + 8f, areaTop + lyrics.height - 8f), 4f, 4f, fill(colors.accent))
@@ -201,14 +234,25 @@ internal object LyricsCardRenderer {
 
     // --- Adaptive lyrics ---------------------------------------------------------------------------
 
-    /** Fewer lines get a bigger starting size; the fit below shrinks further if needed. */
-    private fun sizeFactor(lines: List<String>): Float = when (lines.size) {
+    /**
+     * Starting size factor: fewer lines start bigger, then the user's text size choice is applied.
+     * The fit below still shrinks anything that doesn't fit.
+     */
+    private fun sizeFactor(content: LyricsCardContent): Float = lineCountFactor(content.lines) * textScale(content)
+
+    /** Smallest size for the fit; follows the user's choice down, with a legibility floor. */
+    private fun minSizeFor(content: LyricsCardContent, base: Float): Float =
+        (base * textScale(content).coerceAtMost(1f)).coerceAtLeast(26f)
+
+    private fun textScale(content: LyricsCardContent) = content.textScale.coerceIn(MIN_TEXT_SCALE, MAX_TEXT_SCALE)
+
+    private fun lineCountFactor(lines: List<String>): Float = when (lines.size) {
         0, 1 -> 1f
-        2 -> 0.94f
-        3 -> 0.86f
-        4 -> 0.78f
-        5 -> 0.72f
-        else -> 0.66f
+        2 -> 0.84f
+        3 -> 0.72f
+        4 -> 0.64f
+        5 -> 0.58f
+        else -> 0.54f
     }
 
     /**
