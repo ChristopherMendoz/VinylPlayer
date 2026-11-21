@@ -213,6 +213,8 @@ fun MainScreen(viewModel: PlayerViewModel, onRequestAudioPermission: () -> Unit 
     var settingsReturnView by remember { mutableStateOf(MainView.LIBRARY) }
     var settingsCategoryName by rememberSaveable { mutableStateOf<String?>(null) }
     var showQueue by remember { mutableStateOf(false) }
+    // Song + lyrics snapshot for "Compartir letra" (kept even if playback moves on).
+    var lyricsShareTarget by remember { mutableStateOf<Pair<MusicFile, Lyrics>?>(null) }
     var searchQuery by rememberSaveable { mutableStateOf("") }
     var playerTabName by rememberSaveable { mutableStateOf(PlayerTab.COVER.name) }
     var libraryTabName by rememberSaveable { mutableStateOf(LibraryTab.TRACKS.name) }
@@ -523,6 +525,11 @@ fun MainScreen(viewModel: PlayerViewModel, onRequestAudioPermission: () -> Unit 
                     onTabChange = { playerTabName = it.name },
                     onLyricsOffsetChange = viewModel::adjustLyricsOffset,
                     onToggleLyricsTranslation = viewModel::toggleLyricsTranslation,
+                    onShareLyrics = {
+                        val file = state.musicFile
+                        val lyrics = state.lyrics
+                        if (file != null && lyrics != null) lyricsShareTarget = file to lyrics
+                    },
                     onTogglePlayback = viewModel::togglePlayback,
                     onSeek = viewModel::seekTo,
                     onPrevious = viewModel::skipPrevious,
@@ -618,6 +625,23 @@ fun MainScreen(viewModel: PlayerViewModel, onRequestAudioPermission: () -> Unit 
             onShare = { shareFile(context, file); menuFile = null },
             onRingtone = { setAsRingtone(context, file); menuFile = null },
             onDismiss = { menuFile = null }
+        )
+    }
+    lyricsShareTarget?.let { (file, lyrics) ->
+        // The album's chosen cover, as on the album screen and the mini player.
+        val albumCover = remember(file.uri, file.album, state.library) {
+            val tracks = state.library.filter { it.album == file.album }
+            if (tracks.isEmpty()) null else {
+                val override = albumArtworkPreferences.getString(albumArtworkPreferenceKey(file.album, tracks), null)
+                chooseAlbumCoverTrack(tracks, override) { it.uri.toString() }?.artwork
+            }
+        }
+        com.chrismdz.vinylplayer.ui.lyricsshare.LyricsShareDialog(
+            title = file.title,
+            artist = file.artist,
+            cover = albumCover ?: file.artwork,
+            lyrics = lyrics,
+            onDismiss = { lyricsShareTarget = null }
         )
     }
     if (showPlayerMenu) {
@@ -2494,6 +2518,7 @@ private fun PlayerView(
     onTabChange: (PlayerTab) -> Unit,
     onLyricsOffsetChange: (Long) -> Unit,
     onToggleLyricsTranslation: () -> Unit,
+    onShareLyrics: () -> Unit,
     onTogglePlayback: () -> Unit,
     onSeek: (Float) -> Unit,
     onPrevious: () -> Unit,
@@ -2566,7 +2591,8 @@ private fun PlayerView(
                         translationError = state.translationError,
                         offsetMs = state.lyricsOffsetMs,
                         onToggleTranslation = onToggleLyricsTranslation,
-                        onOffsetChange = onLyricsOffsetChange
+                        onOffsetChange = onLyricsOffsetChange,
+                        onShare = onShareLyrics
                     )
                 }
                 Slider(
@@ -2774,7 +2800,8 @@ private fun LyricsOptionsRow(
     translationError: String?,
     offsetMs: Long,
     onToggleTranslation: () -> Unit,
-    onOffsetChange: (Long) -> Unit
+    onOffsetChange: (Long) -> Unit,
+    onShare: () -> Unit = {}
 ) {
     var fineStep by rememberSaveable { mutableStateOf(true) }
     val stepMs = if (fineStep) 500L else 5_000L
@@ -2787,6 +2814,9 @@ private fun LyricsOptionsRow(
                 verticalAlignment = Alignment.CenterVertically,
                 horizontalArrangement = Arrangement.Center
             ) {
+                IconButton(onClick = onShare, modifier = Modifier.size(42.dp)) {
+                    Icon(Icons.Default.Share, "Compartir letra", tint = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.85f))
+                }
                 if (translationEnabled) {
                     TextButton(onClick = onToggleTranslation, enabled = !translationLoading, contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 8.dp)) {
                         Text(if (showTranslation) "Quitar traducción" else "Traducir", fontSize = 12.sp, maxLines = 1)

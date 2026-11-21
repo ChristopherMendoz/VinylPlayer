@@ -66,6 +66,13 @@ internal object CoverAmbienceCache {
 
     fun peekMiniPlayer(bitmap: Bitmap): Color? = peekColors(bitmap)?.let(::toMiniPlayer)
 
+    /**
+     * Read-only access to the same cached cover analysis for other consumers (lyrics share cards):
+     * the raw characteristic colors, before any screen-specific toning. Nulls = unreadable cover.
+     */
+    suspend fun characteristicColors(bitmap: Bitmap): Pair<Int?, Int?> =
+        colors(bitmap).let { it.primary to it.secondary }
+
     suspend fun miniPlayer(bitmap: Bitmap): Color = toMiniPlayer(colors(bitmap))
 
     private fun toAmbience(colors: CoverColors): CoverAmbience {
