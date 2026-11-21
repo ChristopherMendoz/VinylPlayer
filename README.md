@@ -13,9 +13,11 @@ Reproductor de música local para Android, desarrollado con Kotlin, Jetpack Comp
 - Permite reordenar canciones pendientes arrastrándolas, reproducir una a continuación, agregarla al final o quitarla de la fila.
 - La fila y la sesión se restauran al volver a abrir la app según las preferencias de continuidad.
 - Busca letras y presenta estados de carga, disponibilidad y conexión.
+- Las canciones con letra disponible muestran un distintivo antes del artista en la biblioteca, favoritas, playlists, artistas, álbumes y la fila; se actualiza solo al descargar o eliminar una letra.
 - Las letras sincronizadas siguen la canción y mantienen centrada la línea activa, con tamaño y contexto ajustables.
 - Permite ajustar la sincronización por canción o usar un desfase global; el ajuste individual tiene prioridad.
 - Traduce letras a español, inglés, francés, alemán, italiano o portugués y conserva el idioma asociado a cada traducción guardada.
+- Comparte fragmentos de letra como tarjetas con la portada en alta resolución: la de la canción por defecto o la del álbum cuando es distinta, con los colores de la tarjeta adaptados a la portada elegida.
 - Centro de configuración con secciones de Apariencia, Reproducción, Biblioteca, Letras, Fila, Audio, Almacenamiento y Acerca de.
 - Configuración persistente para tema, acento, fondo del reproductor, animación del brazo, continuidad, cola, orden de biblioteca, letras y ecualizador.
 - La búsqueda de ajustes filtra categorías y opciones; el restablecimiento conserva la música, favoritos, fila, biblioteca y letras guardadas.
