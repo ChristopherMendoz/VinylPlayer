@@ -563,6 +563,26 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
         }
     }
 
+    /** Last high-resolution share covers, keyed by the URI of the file the picture came from. */
+    private val shareCoverCache = android.util.LruCache<String, Bitmap>(SHARE_COVER_CACHE_SIZE)
+
+    /**
+     * Cover for a lyrics card: the song's own embedded picture in high resolution; if the song has
+     * none, the album's cover track ([albumCoverSource]) in high resolution; then any thumbnail in
+     * memory. Cached per source file, so two songs of one album never share each other's picture,
+     * and reopening the same song reuses the same bitmap (and so its cached palette).
+     */
+    suspend fun loadShareCover(song: MusicFile, albumCoverSource: MusicFile?): Bitmap? = withContext(Dispatchers.IO) {
+        fun highRes(file: MusicFile): Bitmap? {
+            val key = file.uri.toString()
+            shareCoverCache.get(key)?.let { return it }
+            return repository.readHighResArtwork(getApplication(), file.uri, SHARE_COVER_MIN_SIDE)
+                ?.also { shareCoverCache.put(key, it) }
+        }
+        val album = albumCoverSource?.takeIf { it.uri != song.uri }
+        highRes(song) ?: song.artwork ?: album?.let { highRes(it) ?: it.artwork }
+    }
+
     fun loadFullArtwork(file: MusicFile) {
         viewModelScope.launch(Dispatchers.IO) {
             val artwork = repository.readFullArtwork(getApplication(), file.uri) ?: return@launch
@@ -1936,6 +1956,8 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     }
 
     companion object {
+        private const val SHARE_COVER_MIN_SIDE = 1080
+        private const val SHARE_COVER_CACHE_SIZE = 3
         private val LYRICS_CACHE_DURATION_MS = TimeUnit.DAYS.toMillis(7)
         private const val MAX_CACHED_ARTIST_BITMAPS = 40
         private const val POSITION_POLL_INTERVAL_MS = 500L

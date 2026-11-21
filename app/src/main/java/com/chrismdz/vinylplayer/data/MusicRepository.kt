@@ -106,6 +106,38 @@ class MusicRepository {
         }
     }
 
+    /**
+     * The song's own embedded picture at high resolution: decoded at full size unless it is very large,
+     * then halved only while the shorter side stays at least [minSide], so it is never upscaled
+     * later and memory stays bounded. Returns null when the file has no embedded picture.
+     */
+    fun readHighResArtwork(context: Context, uri: android.net.Uri, minSide: Int): android.graphics.Bitmap? {
+        val retriever = MediaMetadataRetriever()
+        return try {
+            retriever.setDataSource(context, uri)
+            val data = retriever.embeddedPicture ?: return null
+            val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeByteArray(data, 0, data.size, bounds)
+            val shorter = minOf(bounds.outWidth, bounds.outHeight)
+            if (shorter <= 0) return null
+            var sampleSize = 1
+            while (shorter / (sampleSize * 2) >= minSide) sampleSize *= 2
+            BitmapFactory.decodeByteArray(
+                data, 0, data.size,
+                BitmapFactory.Options().apply {
+                    inSampleSize = sampleSize
+                    inPreferredConfig = android.graphics.Bitmap.Config.ARGB_8888
+                }
+            )
+        } catch (_: Exception) {
+            null
+        } catch (_: OutOfMemoryError) {
+            null
+        } finally {
+            retriever.release()
+        }
+    }
+
     fun readMetadata(context: Context, uri: android.net.Uri): MusicFile {
         val retriever = MediaMetadataRetriever()
         return try {

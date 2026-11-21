@@ -89,7 +89,7 @@ private enum class ShareStep { SELECT, CUSTOMIZE }
 
 /**
  * "Compartir letra": pick lines, then style the card and save or share it.
- * [cover] is the album's cover (same one the album screen and mini player use); its colors come
+ * [cover] is the shared song's own cover (the album cover only when the song has none); its colors come
  * from VinylPlayer's existing cover color system through [LyricsCardPalette].
  */
 @Composable

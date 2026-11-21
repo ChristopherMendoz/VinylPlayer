@@ -14,6 +14,7 @@ import android.text.Layout
 import android.text.StaticLayout
 import android.text.TextPaint
 import android.text.TextUtils
+import kotlin.math.roundToInt
 
 internal enum class LyricsCardStyle(val label: String) {
     CLASSIC("Classic"),
@@ -75,6 +76,7 @@ internal object LyricsCardRenderer {
     private const val W = WIDTH.toFloat()
     private const val H = HEIGHT.toFloat()
     private const val MARGIN = 96f
+    private const val SCALED_COVER_CACHE_BYTES = 6 * 1024 * 1024
 
     private val sansBold: Typeface = Typeface.create(Typeface.SANS_SERIF, Typeface.BOLD)
     private val sansMedium: Typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
@@ -318,14 +320,52 @@ internal object LyricsCardRenderer {
         canvas.drawCircle(cx, cy, radius, paint)
     }
 
+    /**
+     * Square center crop of [cover] at exactly [side] px, reduced in halving steps so a large cover
+     * keeps its detail (a single bilinear pass from 1500 px to 128 px skips most pixels and looks
+     * grainy). Cached per source bitmap and size, so the live preview doesn't rescale every frame and
+     * two different covers can never share an entry. Null when the source can't be scaled here.
+     */
+    private fun scaledCover(cover: Bitmap, side: Int): Bitmap? {
+        if (side <= 0 || cover.config == Bitmap.Config.HARDWARE) return null
+        val key = "${System.identityHashCode(cover)}:${cover.generationId}:${cover.width}x${cover.height}:$side"
+        scaledCovers.get(key)?.let { if (!it.isRecycled) return it }
+        val result = runCatching {
+            val crop = minOf(cover.width, cover.height)
+            var current = Bitmap.createBitmap(cover, (cover.width - crop) / 2, (cover.height - crop) / 2, crop, crop)
+            while (current.width / 2 >= side) {
+                val next = Bitmap.createScaledBitmap(current, current.width / 2, current.height / 2, true)
+                if (current !== cover && current !== next) current.recycle()
+                current = next
+            }
+            if (current.width != side) {
+                val next = Bitmap.createScaledBitmap(current, side, side, true)
+                if (current !== cover && current !== next) current.recycle()
+                current = next
+            }
+            current
+        }.getOrNull() ?: return null
+        scaledCovers.put(key, result)
+        return result
+    }
+
+    private val scaledCovers = object : android.util.LruCache<String, Bitmap>(SCALED_COVER_CACHE_BYTES) {
+        override fun sizeOf(key: String, value: Bitmap): Int = value.byteCount
+    }
+
     /** Center-cropped, rounded cover; a tinted tile with a note when there is no artwork. */
     private fun drawCover(canvas: Canvas, cover: Bitmap?, rect: RectF, radius: Float, colors: LyricsCardColors) {
         canvas.save()
         canvas.clipPath(Path().apply { addRoundRect(rect, radius, radius, Path.Direction.CW) })
         if (cover != null && !cover.isRecycled) {
-            val side = minOf(cover.width, cover.height)
-            val src = Rect((cover.width - side) / 2, (cover.height - side) / 2, (cover.width + side) / 2, (cover.height + side) / 2)
-            canvas.drawBitmap(cover, src, rect, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
+            val scaled = scaledCover(cover, rect.width().roundToInt())
+            if (scaled != null) {
+                canvas.drawBitmap(scaled, null, rect, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
+            } else {
+                val side = minOf(cover.width, cover.height)
+                val src = Rect((cover.width - side) / 2, (cover.height - side) / 2, (cover.width + side) / 2, (cover.height + side) / 2)
+                canvas.drawBitmap(cover, src, rect, Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG))
+            }
         } else {
             canvas.drawRect(rect, fill(withAlpha(colors.accent, 0.35f)))
             val note = textPaint(rect.height() * 0.45f, colors.text, sansBold).apply { textAlign = Paint.Align.CENTER }

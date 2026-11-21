@@ -125,6 +125,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.toMutableStateList
@@ -630,18 +631,23 @@ fun MainScreen(viewModel: PlayerViewModel, onRequestAudioPermission: () -> Unit 
         )
     }
     lyricsShareTarget?.let { (file, lyrics) ->
-        // The album's chosen cover, as on the album screen and the mini player.
-        val albumCover = remember(file.uri, file.album, state.library) {
+        // The album's chosen cover track: only used when the song has no picture of its own.
+        val albumCoverSource = remember(file.uri, file.album, state.library) {
             val tracks = state.library.filter { it.album == file.album }
             if (tracks.isEmpty()) null else {
                 val override = albumArtworkPreferences.getString(albumArtworkPreferenceKey(file.album, tracks), null)
-                chooseAlbumCoverTrack(tracks, override) { it.uri.toString() }?.artwork
+                chooseAlbumCoverTrack(tracks, override) { it.uri.toString() }
             }
+        }
+        // The song's own cover in high resolution. Keyed by the song, so another song's picture is never
+        // kept; the song's thumbnail stands in while the full picture is read.
+        val shareCover by produceState(initialValue = file.artwork, file.uri) {
+            value = viewModel.loadShareCover(file, albumCoverSource)
         }
         com.chrismdz.vinylplayer.ui.lyricsshare.LyricsShareDialog(
             title = file.title,
             artist = file.artist,
-            cover = albumCover ?: file.artwork,
+            cover = shareCover,
             lyrics = lyrics,
             onDismiss = { lyricsShareTarget = null }
         )
