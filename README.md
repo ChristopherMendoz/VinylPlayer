@@ -8,16 +8,20 @@ Reproductor de música local para Android, desarrollado con Kotlin, Jetpack Comp
 - Muestra título, artista, álbum y carátula cuando esos datos están disponibles.
 - Los álbumes se agrupan por nombre exacto, incluidas las variantes de mayúsculas, y muestran el conteo real de pistas. La portada predeterminada es la del primer track y se puede elegir otra portada del álbum.
 - Los detalles de álbum consolidan los créditos de artistas y usan colores derivados de la portada en el fondo del álbum y del reproductor.
+- Cada álbum admite un orden personalizado de canciones: se edita arrastrando, se guarda de forma permanente y se alterna con el orden predeterminado con un toque. La reproducción y la numeración siguen el orden elegido.
 - Controles de reproducción, progreso, aleatorio y repetición.
 - Fila de reproducción dividida entre la canción actual y las siguientes.
 - Permite reordenar canciones pendientes arrastrándolas, reproducir una a continuación, agregarla al final o quitarla de la fila.
 - La fila y la sesión se restauran al volver a abrir la app según las preferencias de continuidad.
 - Busca letras y presenta estados de carga, disponibilidad y conexión.
 - Las canciones con letra disponible muestran un distintivo antes del artista en la biblioteca, favoritas, playlists, artistas, álbumes y la fila; se actualiza solo al descargar o eliminar una letra.
-- Las letras sincronizadas siguen la canción y mantienen centrada la línea activa, con tamaño y contexto ajustables.
+- Las letras sincronizadas se muestran completas y se pueden recorrer con el dedo; la línea activa se resalta y se sigue sola, con tamaño y contexto ajustables.
+- Tocar una línea de la letra salta a ese momento de la canción; al deslizar se pausa el seguimiento y aparece «Volver a la línea actual».
 - Permite ajustar la sincronización por canción o usar un desfase global; el ajuste individual tiene prioridad.
 - Traduce letras a español, inglés, francés, alemán, italiano o portugués y conserva el idioma asociado a cada traducción guardada.
-- Comparte fragmentos de letra como tarjetas con la portada en alta resolución: la de la canción por defecto o la del álbum cuando es distinta, con los colores de la tarjeta adaptados a la portada elegida.
+- Comparte hasta 6 líneas de letra como tarjetas desde las vistas Portada y Letra, para enviarlas a otras apps o guardarlas en la galería.
+- Las tarjetas ofrecen cinco estilos (Classic, Gradient, Minimal, Dark y Editorial), varias fuentes, tamaño de texto ajustable y seis combinaciones de color tomadas de la portada.
+- La portada de la tarjeta se usa en alta resolución: la de la canción por defecto o la del álbum cuando es distinta, con los colores adaptados a la portada elegida.
 - Centro de configuración con secciones de Apariencia, Reproducción, Biblioteca, Letras, Fila, Audio, Almacenamiento y Acerca de.
 - Configuración persistente para tema, acento, fondo del reproductor, animación del brazo, continuidad, cola, orden de biblioteca, letras y ecualizador.
 - La búsqueda de ajustes filtra categorías y opciones; el restablecimiento conserva la música, favoritos, fila, biblioteca y letras guardadas.
