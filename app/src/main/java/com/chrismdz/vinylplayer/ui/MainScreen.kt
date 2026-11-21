@@ -65,6 +65,11 @@ import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
+import androidx.compose.material.icons.filled.DragHandle
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.material.icons.filled.GridView
 import androidx.compose.material.icons.filled.ViewList
 import androidx.compose.material.icons.filled.ChevronRight
@@ -798,6 +803,25 @@ private fun LibraryView(
     val selectedAlbumFiles = remember(state.library, selectedAlbumName) {
         selectedAlbumName?.let { album -> state.library.filter { it.album == album } }.orEmpty()
     }
+    // Per-album custom track order (saved permanently, toggled with one tap).
+    val trackOrderContext = LocalContext.current
+    val albumTrackOrderStore = remember(trackOrderContext) { AlbumTrackOrderStore(trackOrderContext) }
+    var albumTrackOrderRevision by remember { mutableIntStateOf(0) }
+    val albumOrderKey = remember(selectedAlbumName, selectedAlbumFiles) {
+        selectedAlbumName?.let { albumTrackOrderKey(it, selectedAlbumFiles) }
+    }
+    val savedAlbumOrder = remember(albumOrderKey, albumTrackOrderRevision) {
+        albumOrderKey?.let(albumTrackOrderStore::savedOrder)
+    }
+    val albumCustomOrderActive = remember(albumOrderKey, albumTrackOrderRevision) {
+        albumOrderKey?.let(albumTrackOrderStore::isCustomActive) == true
+    }
+    // Tracks as shown and played: the saved order when active, otherwise the default one.
+    val orderedAlbumFiles = remember(selectedAlbumFiles, savedAlbumOrder, albumCustomOrderActive) {
+        if (albumCustomOrderActive && savedAlbumOrder != null) {
+            applyCustomTrackOrder(selectedAlbumFiles, savedAlbumOrder) { it.uri.toString() }
+        } else selectedAlbumFiles
+    }
     val albums = remember(state.library, searchQuery) {
         sortNamedGroups(groupMatchingLibraryItems(
             library = state.library,
@@ -1016,7 +1040,7 @@ private fun LibraryView(
                     } else {
                         AlbumDetailContent(
                             name = selectedAlbumName,
-                            files = selectedAlbumFiles,
+                            files = orderedAlbumFiles,
                             cover = chooseAlbumCoverTrack(
                                 selectedAlbumFiles,
                                 albumArtworkOverrideUri,
@@ -1025,8 +1049,8 @@ private fun LibraryView(
                             currentFile = state.musicFile,
                             listState = albumDetailListState,
                             onRequestArtwork = onRequestArtwork,
-                            onOpenFile = { file -> onPlayGroupedTrack(selectedAlbumFiles, file) },
-                            onPlay = { shuffle -> onPlayAlbum(selectedAlbumFiles, shuffle) },
+                            onOpenFile = { file -> onPlayGroupedTrack(orderedAlbumFiles, file) },
+                            onPlay = { shuffle -> onPlayAlbum(orderedAlbumFiles, shuffle) },
                             onChooseAlbumCover = onChooseAlbumCover,
                             selectedAlbumArtworkOverrideUri = albumArtworkOverrideUri,
                             onMore = onMore,
@@ -1038,7 +1062,24 @@ private fun LibraryView(
                                     com.chrismdz.vinylplayer.data.artistIdentity(it.name) == identity
                                 }?.artistId
                             },
-                            onOpenArtist = onOpenArtist
+                            onOpenArtist = onOpenArtist,
+                            trackOrder = AlbumTrackOrderUi(
+                                customActive = albumCustomOrderActive,
+                                hasSavedOrder = savedAlbumOrder != null,
+                                // The editor starts from the saved order if there is one.
+                                editorStart = savedAlbumOrder
+                                    ?.let { order -> applyCustomTrackOrder(selectedAlbumFiles, order) { it.uri.toString() } }
+                                    ?: selectedAlbumFiles,
+                                defaultOrder = selectedAlbumFiles,
+                                onSetCustomActive = { active ->
+                                    albumOrderKey?.let { albumTrackOrderStore.setCustomActive(it, active) }
+                                    albumTrackOrderRevision++
+                                },
+                                onSaveOrder = { uris ->
+                                    albumOrderKey?.let { albumTrackOrderStore.saveOrder(it, uris) }
+                                    albumTrackOrderRevision++
+                                }
+                            )
                         )
                     }
                     LibraryTab.ARTISTS -> if (selectedArtistId == null) {
@@ -1490,8 +1531,10 @@ private fun AlbumDetailContent(
     isPlaying: Boolean = false,
     /** Library artist id for a credited name, or null when that artist has no profile. */
     findArtistId: (String) -> String? = { null },
-    onOpenArtist: (artistId: String) -> Unit = {}
+    onOpenArtist: (artistId: String) -> Unit = {},
+    trackOrder: AlbumTrackOrderUi? = null
 ) {
+    var showTrackOrderEditor by remember(name) { mutableStateOf(false) }
     var titleBottomPx by remember { mutableStateOf(Int.MAX_VALUE) }
     val collapsed by remember {
         derivedStateOf { listState.firstVisibleItemIndex > 0 || listState.firstVisibleItemScrollOffset > titleBottomPx }
@@ -1686,6 +1729,12 @@ private fun AlbumDetailContent(
                     Spacer(Modifier.width(12.dp))
                     Box(Modifier.weight(1f).height(1.dp).background(Color.White.copy(alpha = 0.10f)))
                 }
+                trackOrder?.let { order ->
+                    AlbumTrackOrderControls(
+                        order = order,
+                        onEdit = { showTrackOrderEditor = true }
+                    )
+                }
             }
         }
         itemsIndexed(files, key = { _, file -> file.uri.toString() }) { index, file ->
@@ -1721,6 +1770,18 @@ private fun AlbumDetailContent(
     )
     }
 
+    if (showTrackOrderEditor && trackOrder != null) {
+        AlbumTrackOrderDialog(
+            albumName = name,
+            start = trackOrder.editorStart,
+            defaultOrder = trackOrder.defaultOrder,
+            onSave = { uris ->
+                trackOrder.onSaveOrder(uris)
+                showTrackOrderEditor = false
+            },
+            onDismiss = { showTrackOrderEditor = false }
+        )
+    }
     if (showAlbumArtworkPicker) {
         AlbumArtworkPickerDialog(
             tracks = files,
@@ -1747,6 +1808,131 @@ private fun AlbumMetaChip(icon: ImageVector, text: String) {
         Icon(icon, null, tint = Color.White.copy(alpha = 0.75f), modifier = Modifier.size(14.dp))
         Spacer(Modifier.width(5.dp))
         Text(text, color = Color.White.copy(alpha = 0.85f), fontSize = 12.sp, fontWeight = FontWeight.Medium, maxLines = 1)
+    }
+}
+
+/** Album track-order state and actions handed to the album screen. */
+private class AlbumTrackOrderUi(
+    val customActive: Boolean,
+    val hasSavedOrder: Boolean,
+    val editorStart: List<MusicFile>,
+    val defaultOrder: List<MusicFile>,
+    val onSetCustomActive: (Boolean) -> Unit,
+    val onSaveOrder: (List<String>) -> Unit
+)
+
+/**
+ * "Predeterminado / Personalizado" switch plus "Editar orden". Choosing Personalizado without a
+ * saved order opens the editor; switching back to Predeterminado keeps the saved order.
+ */
+@Composable
+private fun AlbumTrackOrderControls(order: AlbumTrackOrderUi, onEdit: () -> Unit) {
+    Row(
+        Modifier.fillMaxWidth().padding(bottom = 6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        LibraryPill("Predeterminado", selected = !order.customActive) {
+            if (order.customActive) order.onSetCustomActive(false)
+        }
+        LibraryPill("Personalizado", selected = order.customActive) {
+            when {
+                order.customActive -> Unit
+                order.hasSavedOrder -> order.onSetCustomActive(true)
+                else -> onEdit()
+            }
+        }
+        Spacer(Modifier.weight(1f))
+        IconButton(onClick = onEdit) {
+            Icon(Icons.Default.Edit, "Editar orden de canciones", tint = Color.White.copy(alpha = 0.85f))
+        }
+    }
+}
+
+/** Full-screen editor: drag ≡ (or long-press a song) to reorder the album, then save. */
+@Composable
+private fun AlbumTrackOrderDialog(
+    albumName: String,
+    start: List<MusicFile>,
+    defaultOrder: List<MusicFile>,
+    onSave: (List<String>) -> Unit,
+    onDismiss: () -> Unit
+) {
+    val rows = remember(start) { start.toMutableStateList() }
+    val listState = rememberLazyListState()
+    val reorder = rememberReorderableListState(
+        listState = listState,
+        onMove = { from, to -> if (from in rows.indices && to in rows.indices) rows.add(to, rows.removeAt(from)) },
+        indexOf = { key -> rows.indexOfFirst { it.uri.toString() == key } }
+    )
+    Dialog(onDismissRequest = onDismiss, properties = DialogProperties(usePlatformDefaultWidth = false)) {
+        Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
+            Column(Modifier.fillMaxSize().systemBarsPadding().padding(horizontal = 16.dp)) {
+                Row(Modifier.fillMaxWidth().padding(top = 6.dp), verticalAlignment = Alignment.CenterVertically) {
+                    IconButton(onClick = onDismiss) { Icon(Icons.Default.Clear, "Cancelar", tint = MaterialTheme.colorScheme.onSurface) }
+                    Column(Modifier.weight(1f), horizontalAlignment = Alignment.CenterHorizontally) {
+                        Text("Orden del álbum", color = MaterialTheme.colorScheme.onSurface, fontSize = 18.sp, fontWeight = FontWeight.Bold)
+                        Text(albumName, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    }
+                    TextButton(onClick = { onSave(rows.map { it.uri.toString() }) }) {
+                        Text("Guardar", color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.Bold)
+                    }
+                }
+                Row(
+                    Modifier.fillMaxWidth().padding(vertical = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        "Arrastra ≡ o mantén presionada una canción",
+                        color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.6f),
+                        fontSize = 12.sp,
+                        modifier = Modifier.weight(1f)
+                    )
+                    // Starting point for a new order; nothing is saved until Guardar.
+                    TextButton(onClick = { rows.clear(); rows.addAll(defaultOrder) }) {
+                        Text("Restablecer", color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
+                    }
+                }
+                LazyColumn(
+                    state = listState,
+                    modifier = Modifier.weight(1f).fillMaxWidth().reorderable(reorder, handleWidth = 48.dp)
+                ) {
+                    itemsIndexed(rows, key = { _, file -> file.uri.toString() }) { index, file ->
+                        val key = file.uri.toString()
+                        val dragging = reorder.draggingKey == key
+                        Row(
+                            reorderableItem(reorder, key, RoundedCornerShape(10.dp))
+                                .fillMaxWidth()
+                                .background(
+                                    if (dragging) MaterialTheme.colorScheme.surfaceContainerHigh else Color.Transparent,
+                                    RoundedCornerShape(10.dp)
+                                )
+                                .padding(start = 8.dp, top = 6.dp, bottom = 6.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(
+                                "${index + 1}",
+                                color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.5f),
+                                fontSize = 14.sp,
+                                fontWeight = FontWeight.Medium,
+                                modifier = Modifier.width(32.dp)
+                            )
+                            Column(Modifier.weight(1f)) {
+                                Text(file.title, color = MaterialTheme.colorScheme.onSurface, fontSize = 15.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                                Text(file.artist, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.55f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                            }
+                            // Visual handle; the drag is handled by Modifier.reorderable (48.dp strip).
+                            Icon(
+                                Icons.Default.DragHandle,
+                                "Arrastrar para reordenar",
+                                tint = if (dragging) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface.copy(alpha = 0.7f),
+                                modifier = Modifier.size(48.dp).padding(12.dp)
+                            )
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2853,6 +3039,12 @@ private fun paletteBackgroundColors(palette: List<Int>): List<Color> {
         shade(combined, 0.36f),
         Color(0xFF090B0B)
     )
+}
+
+/** Identifies an album for its saved track order: album name + primary artist. */
+private fun albumTrackOrderKey(albumName: String, tracks: List<MusicFile>): String {
+    val primaryArtist = consolidateAlbumArtists(tracks.map(MusicFile::artist)).primaryArtist.orEmpty()
+    return "${android.net.Uri.encode(albumName)}-${android.net.Uri.encode(primaryArtist)}"
 }
 
 private fun albumArtworkPreferenceKey(albumName: String, tracks: List<MusicFile>): String {
