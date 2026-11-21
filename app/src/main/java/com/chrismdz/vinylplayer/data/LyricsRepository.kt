@@ -2,6 +2,8 @@ package com.chrismdz.vinylplayer.data
 
 import com.chrismdz.vinylplayer.data.MusicFile
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.map
 
 interface LyricsProvider {
     suspend fun searchLyrics(artist: String, title: String): LyricsResult
@@ -11,6 +13,8 @@ interface LyricsRepository {
     suspend fun getLyrics(songId: String): Lyrics?
     suspend fun fetchAndSaveLyrics(song: MusicFile): Lyrics
     suspend fun translateAndSaveLyrics(song: MusicFile, targetLanguage: String): Lyrics
+    /** Song ids (URIs) that currently have lyrics stored in the cache. */
+    fun observeSongIdsWithLyrics(): Flow<Set<String>>
 }
 
 class RoomLyricsRepository(
@@ -19,6 +23,9 @@ class RoomLyricsRepository(
     private val translator: LyricsTranslationProvider = LyricsTranslationProvider()
 ) : LyricsRepository {
     override suspend fun getLyrics(songId: String): Lyrics? = dao.find(songId)?.toModel()
+
+    override fun observeSongIdsWithLyrics(): Flow<Set<String>> =
+        dao.observeSongIdsWithLyrics().map { it.toHashSet() }
 
     override suspend fun fetchAndSaveLyrics(song: MusicFile): Lyrics {
         val songId = song.uri.toString()

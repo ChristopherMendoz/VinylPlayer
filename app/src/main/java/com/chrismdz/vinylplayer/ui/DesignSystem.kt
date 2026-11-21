@@ -352,6 +352,10 @@ internal fun TrackRow(
                     Icon(Icons.Default.Favorite, "Favorito", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(12.dp))
                     Spacer(Modifier.width(VinylSpacing.xxs))
                 }
+                if (hasCachedLyrics(file)) {
+                    LyricsBadge()
+                    Spacer(Modifier.width(6.dp))
+                }
                 Text(
                     subtitle,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,

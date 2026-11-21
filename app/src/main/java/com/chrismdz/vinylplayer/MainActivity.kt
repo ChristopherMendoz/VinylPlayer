@@ -8,8 +8,10 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.viewModels
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
+import com.chrismdz.vinylplayer.ui.LocalSongsWithLyrics
 import com.chrismdz.vinylplayer.ui.MainScreen
 import com.chrismdz.vinylplayer.ui.PlayerViewModel
 import com.chrismdz.vinylplayer.ui.VinylPlayerTheme
@@ -34,7 +36,10 @@ class MainActivity : ComponentActivity() {
                 accentColor = appSettings.accentColor,
                 customAccentArgb = appSettings.customAccentArgb
             ) {
-                MainScreen(viewModel = playerViewModel, onRequestAudioPermission = ::requestMusicPermissions)
+                val songsWithLyrics by playerViewModel.songsWithLyrics.collectAsStateWithLifecycle()
+                CompositionLocalProvider(LocalSongsWithLyrics provides songsWithLyrics) {
+                    MainScreen(viewModel = playerViewModel, onRequestAudioPermission = ::requestMusicPermissions)
+                }
             }
         }
     }

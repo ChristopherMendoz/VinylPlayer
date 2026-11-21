@@ -2069,13 +2069,19 @@ private fun AlbumTrackRow(
                 maxLines = 1,
                 overflow = TextOverflow.Ellipsis
             )
-            Text(
-                file.artist,
-                color = if (isCurrent) accent.copy(alpha = 0.85f) else Color.White.copy(alpha = 0.6f),
-                fontSize = 13.sp,
-                maxLines = 1,
-                overflow = TextOverflow.Ellipsis
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (hasCachedLyrics(file)) {
+                    LyricsBadge(tint = accent)
+                    Spacer(Modifier.width(6.dp))
+                }
+                Text(
+                    file.artist,
+                    color = if (isCurrent) accent.copy(alpha = 0.85f) else Color.White.copy(alpha = 0.6f),
+                    fontSize = 13.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+            }
         }
         if (file.durationMs > 0) {
             Text(
@@ -4034,7 +4040,13 @@ private fun QueueRow(
         }
         Column(Modifier.weight(1f).padding(horizontal = 12.dp)) {
             Text(file.title, color = if (isCurrent) Color(0xFF41D476) else MaterialTheme.colorScheme.onSurface, fontSize = 17.sp, maxLines = 1)
-            Text(file.artist, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f), fontSize = 13.sp, maxLines = 1)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (hasCachedLyrics(file)) {
+                    LyricsBadge()
+                    Spacer(Modifier.width(6.dp))
+                }
+                Text(file.artist, color = MaterialTheme.colorScheme.onSurface.copy(alpha = 0.62f), fontSize = 13.sp, maxLines = 1)
+            }
         }
         if (isCurrent) {
             Icon(Icons.Default.Pause, "Reproduciendo", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(22.dp))

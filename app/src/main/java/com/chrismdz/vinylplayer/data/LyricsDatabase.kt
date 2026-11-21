@@ -11,6 +11,7 @@ import androidx.room.PrimaryKey
 import androidx.room.Query
 import androidx.room.Room
 import androidx.room.RoomDatabase
+import kotlinx.coroutines.flow.Flow
 
 @Entity(
     tableName = "lyrics",
@@ -34,6 +35,16 @@ interface LyricsDao {
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun save(lyrics: LyricsEntity)
+
+    /**
+     * Ids of cached songs whose plain or synced lyrics are non-empty (same rule as `Lyrics.found`).
+     * Room re-emits whenever the lyrics table changes, so new or removed lyrics show up on their own.
+     */
+    @Query(
+        "SELECT songId FROM lyrics WHERE (lyrics IS NOT NULL AND TRIM(lyrics) != '') " +
+            "OR (syncedLyrics IS NOT NULL AND TRIM(syncedLyrics) != '')"
+    )
+    fun observeSongIdsWithLyrics(): Flow<List<String>>
 }
 
 @Database(entities = [LyricsEntity::class, ArtistEntity::class, ArtistTrackCreditEntity::class], version = 5, exportSchema = false)
