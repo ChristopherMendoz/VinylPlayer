@@ -79,14 +79,15 @@ fun VinylView(
         // Record surface: static drawing. Its grooves are rotationally symmetric and its sheen
         // comes from a fixed light, so it is drawn once and never redrawn while spinning.
         Spacer(Modifier.fillMaxSize().vinylRecordBody())
-        // The cover printed across the whole record (as before), under the grooves and the sheen.
+        // The cover across the whole record, as before: over the grooves (which only show faintly
+        // through it) and under the light reflections.
         if (artwork != null) {
             Image(
                 bitmap = artwork.asImageBitmap(),
                 contentDescription = null,
                 modifier = Modifier.fillMaxSize().clip(CircleShape),
                 contentScale = ContentScale.Fit,
-                alpha = 0.9f
+                alpha = 0.94f
             )
         }
         Spacer(Modifier.fillMaxSize().vinylRecordSurface())
@@ -126,14 +127,23 @@ fun VinylView(
 
 private const val LABEL_FRACTION = 0.45f
 
+/** Strength of the groove lines drawn over the cover: raise to make grooves more visible. */
+private const val GROOVE_OVERLAY_DARK = 0.12f
+private const val GROOVE_OVERLAY_LIGHT = 0.035f
+
 // ---------------------------------------------------------------------------------------------
 // Record
 // ---------------------------------------------------------------------------------------------
 
-/** Black vinyl body and the shadow it casts; the cover and grooves are drawn over it. */
+/**
+ * Black vinyl body, its cast shadow and the grooves. The cover is drawn on top of all this, so the
+ * grooves only show faintly through it (and fully on a record without cover).
+ */
 private fun Modifier.vinylRecordBody(): Modifier = drawWithCache {
     val center = Offset(size.width / 2f, size.height / 2f)
     val radius = size.minDimension / 2f
+    val labelRadius = radius * LABEL_FRACTION
+    val hairline = 0.6f * density
     val body = Brush.radialGradient(
         0f to Color(0xFF1B1B1D),
         0.55f to Color(0xFF0E0E10),
@@ -147,47 +157,6 @@ private fun Modifier.vinylRecordBody(): Modifier = drawWithCache {
         1f to Color.Transparent,
         center = Offset(center.x, center.y + radius * 0.03f),
         radius = radius * 1.06f
-    )
-    onDrawBehind {
-        drawCircle(dropShadow, radius * 1.06f, Offset(center.x, center.y + radius * 0.03f))
-        drawCircle(body, radius, center)
-    }
-}
-
-/** Grooves, sheen and beveled edge, drawn over the cover so it reads as pressed vinyl. */
-private fun Modifier.vinylRecordSurface(): Modifier = drawWithCache {
-    val center = Offset(size.width / 2f, size.height / 2f)
-    val radius = size.minDimension / 2f
-    val labelRadius = radius * LABEL_FRACTION
-    val hairline = 0.6f * density
-
-    // Light reflected by the grooves: two opposed bright wedges, like a lamp over a real record.
-    val sheen = Brush.sweepGradient(
-        0.00f to Color.Transparent,
-        0.07f to Color.White.copy(alpha = 0.11f),
-        0.13f to Color.White.copy(alpha = 0.03f),
-        0.20f to Color.Transparent,
-        0.50f to Color.Transparent,
-        0.57f to Color.White.copy(alpha = 0.08f),
-        0.63f to Color.White.copy(alpha = 0.02f),
-        0.70f to Color.Transparent,
-        1.00f to Color.Transparent,
-        center = center
-    )
-    // Soft broad highlight from the upper left gives the disc volume.
-    val gloss = Brush.radialGradient(
-        0f to Color.White.copy(alpha = 0.07f),
-        1f to Color.Transparent,
-        center = Offset(center.x - radius * 0.45f, center.y - radius * 0.5f),
-        radius = radius * 0.9f
-    )
-    // Beveled edge: lit on top-left, in shadow on the bottom-right.
-    val rim = Brush.linearGradient(
-        0f to Color.White.copy(alpha = 0.32f),
-        0.5f to Color.White.copy(alpha = 0.06f),
-        1f to Color.Black.copy(alpha = 0.6f),
-        start = Offset(center.x - radius, center.y - radius),
-        end = Offset(center.x + radius, center.y + radius)
     )
     // Groove radii: fine grooves, with a few wider glossy "gaps" between tracks.
     val grooveStart = labelRadius + radius * 0.07f
@@ -203,13 +172,14 @@ private fun Modifier.vinylRecordSurface(): Modifier = drawWithCache {
             i++
         }
     }
-
     onDrawBehind {
+        drawCircle(dropShadow, radius * 1.06f, Offset(center.x, center.y + radius * 0.03f))
+        drawCircle(body, radius, center)
         // Grooves: alternating faint light and dark rings read as the spiral's texture.
         grooves.forEach { (r, i) ->
             drawCircle(
                 color = if (i % 2 == 0) Color.White.copy(alpha = if (i % 7 == 0) 0.06f else 0.035f)
-                else Color.Black.copy(alpha = 0.45f),
+                else Color.Black.copy(alpha = 0.3f),
                 radius = r,
                 center = center,
                 style = Stroke(width = hairline)
@@ -219,14 +189,67 @@ private fun Modifier.vinylRecordSurface(): Modifier = drawWithCache {
         trackGaps.forEach { r ->
             drawCircle(Color.White.copy(alpha = 0.045f), r, center, style = Stroke(width = 2.2f * density))
         }
-        // Lead-out: smooth glossy vinyl around the label, with a single run-out groove.
-        drawCircle(Color(0xFF111113).copy(alpha = 0.35f), grooveStart, center)
+        // Lead-out: a single run-out groove near the label.
         drawCircle(Color.White.copy(alpha = 0.05f), labelRadius + radius * 0.035f, center, style = Stroke(width = hairline))
+    }
+}
 
+/**
+ * Over the cover: a very light groove texture (visible but never dominant, so the cover keeps its
+ * colors), the light reflections and a lit bevel.
+ */
+private fun Modifier.vinylRecordSurface(): Modifier = drawWithCache {
+    val center = Offset(size.width / 2f, size.height / 2f)
+    val radius = size.minDimension / 2f
+    val grooveStart = radius * LABEL_FRACTION + radius * 0.07f
+    val grooveEnd = radius * 0.955f
+    val grooveStep = 1.6f * density
+    val grooveRadii = buildList {
+        var r = grooveStart
+        while (r < grooveEnd) { add(r); r += grooveStep }
+    }
+    // Light reflected by the grooves: two opposed bright wedges, like a lamp over a real record.
+    val sheen = Brush.sweepGradient(
+        0.00f to Color.Transparent,
+        0.07f to Color.White.copy(alpha = 0.09f),
+        0.13f to Color.White.copy(alpha = 0.025f),
+        0.20f to Color.Transparent,
+        0.50f to Color.Transparent,
+        0.57f to Color.White.copy(alpha = 0.065f),
+        0.63f to Color.White.copy(alpha = 0.015f),
+        0.70f to Color.Transparent,
+        1.00f to Color.Transparent,
+        center = center
+    )
+    // Soft broad highlight from the upper left gives the disc volume.
+    val gloss = Brush.radialGradient(
+        0f to Color.White.copy(alpha = 0.06f),
+        1f to Color.Transparent,
+        center = Offset(center.x - radius * 0.45f, center.y - radius * 0.5f),
+        radius = radius * 0.9f
+    )
+    // Beveled edge: lit on the top-left, in shadow on the bottom-right (gives the 3D look).
+    val rim = Brush.linearGradient(
+        0f to Color.White.copy(alpha = 0.32f),
+        0.5f to Color.White.copy(alpha = 0.06f),
+        1f to Color.Black.copy(alpha = 0.6f),
+        start = Offset(center.x - radius, center.y - radius),
+        end = Offset(center.x + radius, center.y + radius)
+    )
+    onDrawBehind {
+        // Faint grooves over the cover: thin dark lines with a hint of light between them.
+        grooveRadii.forEachIndexed { i, r ->
+            drawCircle(
+                color = if (i % 2 == 0) Color.Black.copy(alpha = GROOVE_OVERLAY_DARK)
+                else Color.White.copy(alpha = GROOVE_OVERLAY_LIGHT),
+                radius = r,
+                center = center,
+                style = Stroke(width = 0.6f * density)
+            )
+        }
         drawCircle(sheen, radius, center)
         drawCircle(gloss, radius, center)
-
-        // Edge: thin bevel plus a darker lip just inside it.
+        // Edge: darker lip just inside it, then the lit/shadowed bevel.
         drawCircle(Color.Black.copy(alpha = 0.7f), radius * 0.975f, center, style = Stroke(width = 1.4f * density))
         drawCircle(rim, radius - 0.75f * density, center, style = Stroke(width = 1.5f * density))
     }
@@ -420,7 +443,8 @@ private fun DrawScope.armShapes(
         translate(pivot.x + length - headLength * 0.82f, pivot.y) {
             drawRoundRect(brush(ArmPart.Head), Offset(0f, -headWidth / 2f), Size(headLength, headWidth), CornerRadius(headWidth * 0.22f))
             drawRoundRect(brush(ArmPart.Tube), Offset(headLength * 0.18f, -headWidth * 0.32f), Size(headLength * 0.5f, headWidth * 0.64f), CornerRadius(headWidth * 0.12f))
-            drawLine(brush(ArmPart.Tube), Offset(headLength * 0.25f, -headWidth / 2f), Offset(headLength * 0.05f, -headWidth * 1.15f), strokeWidth = tubeWidth * 0.45f, cap = StrokeCap.Round)
+            // Finger lift: starts inside the headshell's front corner so it reads as part of it.
+            drawLine(brush(ArmPart.Tube), Offset(headLength * 0.86f, -headWidth * 0.3f), Offset(headLength * 1.04f, -headWidth * 0.82f), strokeWidth = tubeWidth * 0.5f, cap = StrokeCap.Round)
         }
     }
 }
