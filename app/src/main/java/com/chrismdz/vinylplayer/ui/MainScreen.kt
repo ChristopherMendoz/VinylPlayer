@@ -736,7 +736,8 @@ private fun TopBar(
             overflow = TextOverflow.Ellipsis,
             modifier = Modifier.weight(1f)
         )
-        if (currentView != MainView.INFO) {
+        // Settings are reached from the library; the player and the song info screens don't show it.
+        if (currentView != MainView.INFO && currentView != MainView.PLAYER) {
             IconButton(onClick = onSettings) {
                 Icon(Icons.Default.Settings, "Configuración", tint = MaterialTheme.colorScheme.onSurface)
             }
