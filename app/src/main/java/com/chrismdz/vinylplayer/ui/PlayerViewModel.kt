@@ -1570,11 +1570,19 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     fun seekTo(fraction: Float) {
         val duration = _uiState.value.durationMs
-        if (duration > 0) {
-            val position = (duration * fraction).toLong().coerceIn(0L, duration)
-            _playbackPositionMs.value = position
-            musicPlayer?.seekTo(position)
-        }
+        if (duration > 0) seekToMs((duration * fraction).toLong())
+    }
+
+    /**
+     * Seeks to an exact time (e.g. a lyric line's timestamp). Same path as the seek bar: the
+     * position is published right away so the UI updates without waiting for the next poll, and
+     * playback keeps its current play/pause state.
+     */
+    fun seekToMs(positionMs: Long) {
+        val duration = _uiState.value.durationMs
+        val position = if (duration > 0) positionMs.coerceIn(0L, duration) else positionMs.coerceAtLeast(0L)
+        _playbackPositionMs.value = position
+        musicPlayer?.seekTo(position)
     }
 
     fun toggleFavorite() {

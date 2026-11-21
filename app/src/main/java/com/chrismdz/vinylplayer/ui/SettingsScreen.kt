@@ -642,10 +642,10 @@ private fun LyricsSettings(settings: AppSettings, query: String, onChange: (AppS
                 }
             }
             if (matches(query, "Líneas anteriores", "líneas siguientes", "contexto")) {
-                SliderSetting("Líneas anteriores", settings.lyricsPreviousLines.toString(), settings.lyricsPreviousLines.toFloat(), 0f..8f, 7) {
+                SliderSetting("Líneas anteriores resaltadas", settings.lyricsPreviousLines.toString(), settings.lyricsPreviousLines.toFloat(), 0f..8f, 7) {
                     onChange(settings.copy(lyricsPreviousLines = it.toInt()))
                 }
-                SliderSetting("Líneas siguientes", settings.lyricsNextLines.toString(), settings.lyricsNextLines.toFloat(), 0f..12f, 11) {
+                SliderSetting("Líneas siguientes resaltadas", settings.lyricsNextLines.toString(), settings.lyricsNextLines.toFloat(), 0f..12f, 11) {
                     onChange(settings.copy(lyricsNextLines = it.toInt()))
                 }
             }

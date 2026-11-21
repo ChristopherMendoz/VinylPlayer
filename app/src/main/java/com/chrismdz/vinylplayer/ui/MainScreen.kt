@@ -65,6 +65,7 @@ import androidx.compose.material.icons.filled.PlaylistAdd
 import androidx.compose.material.icons.filled.PlaylistPlay
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.compose.material.icons.filled.DragHandle
@@ -141,6 +142,7 @@ import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Shadow
@@ -2579,6 +2581,12 @@ private fun PlayerView(
                             followLyrics = followLyrics,
                             onManualScroll = { followLyrics = false },
                             onResumeFollow = { followLyrics = true },
+                            onSeekToLine = { lineStartMs ->
+                                // Real timestamp, corrected by the lyrics offset so this exact line
+                                // becomes active; following resumes and the view glides to it.
+                                viewModel.seekToMs((lineStartMs - state.lyricsOffsetMs).coerceAtLeast(0L))
+                                followLyrics = true
+                            },
                             modifier = Modifier.fillMaxSize()
                         )
                     }
@@ -3137,6 +3145,8 @@ private fun LyricsOverlay(
     followLyrics: Boolean,
     onManualScroll: () -> Unit,
     onResumeFollow: () -> Unit,
+    /** Called with a synced line's real timestamp when the user taps it. */
+    onSeekToLine: (lineStartMs: Long) -> Unit = {},
     modifier: Modifier = Modifier
 ) {
     // The original lyrics always drive the layout and timing; a translation is shown small under each
@@ -3162,6 +3172,7 @@ private fun LyricsOverlay(
         if (translated.size == plainLines.size) translated else emptyList()
     }
     val playbackTime = positionMs + offsetMs
+    // Same lookup as before: the last line whose timestamp has been reached (-1 = before the first).
     val currentLine = remember(syncedLines, playbackTime) {
         var low = 0
         var high = syncedLines.size
@@ -3171,37 +3182,37 @@ private fun LyricsOverlay(
         }
         low - 1
     }
-    val firstVisibleLine = if (currentLine >= 0) (currentLine - previousLines).coerceAtLeast(0) else 0
-    val lastVisibleLine = if (currentLine >= 0) {
-        (currentLine + nextLines).coerceAtMost(syncedLines.lastIndex)
-    } else {
-        nextLines.coerceAtMost(syncedLines.lastIndex)
-    }
-    val visibleSyncedLines = if (syncedLines.isNotEmpty() && lastVisibleLine >= firstVisibleLine) {
-        syncedLines.subList(firstVisibleLine, lastVisibleLine + 1)
-    } else {
-        emptyList()
-    }
     val listState = rememberLazyListState()
-    var isAutoScrolling by remember { mutableStateOf(false) }
+    val currentOnManualScroll by androidx.compose.runtime.rememberUpdatedState(onManualScroll)
+    // Only real finger drags suspend following; our own animated scrolls never emit drag interactions,
+    // so there is no conflict between automatic and manual scrolling.
+    LaunchedEffect(listState) {
+        listState.interactionSource.interactions.collect { interaction ->
+            if (interaction is androidx.compose.foundation.interaction.DragInteraction.Start) currentOnManualScroll()
+        }
+    }
     BoxWithConstraints(modifier = modifier.fillMaxWidth()) {
-        // Lines are already windowed (previous … next), so the block starts at the top instead of
-        // being pushed to the middle by half a screen of padding.
-        val topInset = 8.dp
-        val bottomInset = 24.dp
-        LaunchedEffect(listState) {
-            snapshotFlow { listState.isScrollInProgress to isAutoScrolling }.collect { (scrolling, autoScrolling) ->
-                if (scrolling && !autoScrolling) onManualScroll()
+        // Scrolling a line to the top of the content area puts it at 32 % of the height: slightly
+        // above the middle, comfortable to read. The insets let the first and last lines get there.
+        val topInset = maxHeight * 0.32f
+        val bottomInset = maxHeight * 0.6f
+        var positioned by remember { mutableStateOf(false) }
+        LaunchedEffect(currentLine, followLyrics, status, syncedLines) {
+            if (!followLyrics || status != LyricsStatus.AVAILABLE || syncedLines.isEmpty()) return@LaunchedEffect
+            val target = currentLine.coerceAtLeast(0)
+            // First placement (opening the tab, new song) jumps; later line changes glide.
+            if (!positioned) {
+                listState.scrollToItem(target)
+                positioned = true
+            } else {
+                listState.animateScrollToItem(target)
             }
         }
-        LaunchedEffect(currentLine, status, firstVisibleLine, followLyrics) {
-            if (followLyrics && status == LyricsStatus.AVAILABLE && syncedLines.isNotEmpty()) {
-                isAutoScrolling = true
-                try {
-                    listState.animateScrollToItem(0)
-                } finally {
-                    isAutoScrolling = false
-                }
+        // "Back to the current line" only while following is off and the active line is off screen.
+        val activeLineVisible by remember(currentLine) {
+            derivedStateOf {
+                val visible = listState.layoutInfo.visibleItemsInfo
+                currentLine < 0 || visible.any { it.index == currentLine }
             }
         }
         Box(Modifier.fillMaxSize()) {
@@ -3209,13 +3220,30 @@ private fun LyricsOverlay(
                 LyricsStatus.AVAILABLE -> {
                     LazyColumn(
                         state = listState,
-                        modifier = Modifier.fillMaxSize().padding(horizontal = 8.dp),
-                        contentPadding = PaddingValues(
-                            start = 8.dp,
-                            end = 8.dp,
-                            top = topInset,
-                            bottom = bottomInset
-                        ),
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 8.dp)
+                            // Lines fade out at the top and bottom edges instead of being cut off
+                            // under the song header or above the controls.
+                            .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
+                            .drawWithContent {
+                                drawContent()
+                                val fade = (40.dp.toPx() / size.height).coerceIn(0f, 0.3f)
+                                drawRect(
+                                    Brush.verticalGradient(
+                                        0f to Color.Transparent,
+                                        fade to Color.Black,
+                                        1f - fade to Color.Black,
+                                        1f to Color.Transparent
+                                    ),
+                                    blendMode = androidx.compose.ui.graphics.BlendMode.DstIn
+                                )
+                            },
+                        contentPadding = if (syncedLines.isNotEmpty()) {
+                            PaddingValues(start = 8.dp, end = 8.dp, top = topInset, bottom = bottomInset)
+                        } else {
+                            PaddingValues(start = 8.dp, end = 8.dp, top = 8.dp, bottom = 24.dp)
+                        },
                         verticalArrangement = if (syncedLines.isNotEmpty()) {
                             Arrangement.spacedBy(14.dp)
                         } else {
@@ -3223,28 +3251,20 @@ private fun LyricsOverlay(
                         }
                     ) {
                         if (syncedLines.isNotEmpty()) {
-                            itemsIndexed(visibleSyncedLines) { index, line ->
-                                val absoluteIndex = index + firstVisibleLine
-                                val distance = if (currentLine >= 0) abs(absoluteIndex - currentLine) else 1
-                                val lineAlpha = when (distance) {
-                                    0 -> 1f
-                                    1 -> 0.72f
-                                    else -> 0.42f
-                                }
-                                val lineSize = when (distance) {
-                                    0 -> fontSizeSp + 5
-                                    1 -> fontSizeSp
-                                    else -> (fontSizeSp - 3).coerceAtLeast(13)
-                                }
-                                LyricLineWithTranslation(
+                            // The whole song, every line keeping its own timestamp.
+                            itemsIndexed(syncedLines, key = { index, line -> "$index:${line.startMs}" }) { index, line ->
+                                val state = syncedLineState(index, currentLine, previousLines, nextLines)
+                                SyncedLyricLine(
                                     text = line.text,
-                                    translation = syncedTranslations.getOrNull(absoluteIndex),
-                                    alpha = lineAlpha,
-                                    fontSizeSp = lineSize,
-                                    fontWeight = if (!boldText) FontWeight.Normal else if (distance == 0) FontWeight.Bold else FontWeight.SemiBold
+                                    translation = syncedTranslations.getOrNull(index),
+                                    state = state,
+                                    fontSizeSp = fontSizeSp,
+                                    boldText = boldText,
+                                    onClick = { onSeekToLine(line.startMs) }
                                 )
                             }
                         } else {
+                            // Unsynced: full text and free scrolling, but no fake timing or seeking.
                             itemsIndexed(plainLines) { index, line ->
                                 Box(Modifier.padding(vertical = 5.dp)) {
                                     LyricLineWithTranslation(
@@ -3258,16 +3278,24 @@ private fun LyricsOverlay(
                             }
                         }
                     }
-                    if (!followLyrics && syncedLines.isNotEmpty()) {
-                        TextButton(
-                            onClick = onResumeFollow,
-                            modifier = Modifier
-                                .align(Alignment.TopEnd)
-                                .padding(top = 2.dp, end = 8.dp)
-                                .clip(RoundedCornerShape(18.dp))
-                                .background(Color(0xAA211116))
+                    androidx.compose.animation.AnimatedVisibility(
+                        visible = !followLyrics && syncedLines.isNotEmpty() && !activeLineVisible,
+                        modifier = Modifier.align(Alignment.BottomCenter).padding(bottom = 12.dp),
+                        enter = androidx.compose.animation.fadeIn() + androidx.compose.animation.slideInVertically { it / 2 },
+                        exit = androidx.compose.animation.fadeOut() + androidx.compose.animation.slideOutVertically { it / 2 }
+                    ) {
+                        Row(
+                            Modifier
+                                .clip(CircleShape)
+                                .background(Color(0xE6181818))
+                                .border(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.45f), CircleShape)
+                                .clickable { onResumeFollow() }
+                                .padding(horizontal = 16.dp, vertical = 9.dp),
+                            verticalAlignment = Alignment.CenterVertically
                         ) {
-                            Text("Seguir letra", color = MaterialTheme.colorScheme.onSurface, fontSize = 11.sp)
+                            Icon(Icons.Default.MyLocation, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Volver a la línea actual", color = Color.White, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
                         }
                     }
                 }
@@ -3279,6 +3307,66 @@ private fun LyricsOverlay(
                 LyricsStatus.IDLE -> LyricsStatusMessage("Selecciona una canción")
             }
         }
+    }
+}
+
+/** Where a synced line stands relative to playback; few lines change state per line change. */
+private enum class SyncedLineState { ACTIVE, NEAR_PAST, NEAR_NEXT, PAST, UPCOMING }
+
+private fun syncedLineState(index: Int, current: Int, previousLines: Int, nextLines: Int): SyncedLineState = when {
+    current < 0 -> if (index <= nextLines) SyncedLineState.NEAR_NEXT else SyncedLineState.UPCOMING
+    index == current -> SyncedLineState.ACTIVE
+    index < current -> if (current - index <= previousLines) SyncedLineState.NEAR_PAST else SyncedLineState.PAST
+    else -> if (index - current <= nextLines) SyncedLineState.NEAR_NEXT else SyncedLineState.UPCOMING
+}
+
+/**
+ * One synced line. Keeps the existing look (size steps, weights, translation under the line) and
+ * animates only when its own state changes, so a line change recomposes just a couple of rows.
+ * Tapping it seeks playback to the line's timestamp.
+ */
+@Composable
+private fun SyncedLyricLine(
+    text: String,
+    translation: String?,
+    state: SyncedLineState,
+    fontSizeSp: Int,
+    boldText: Boolean,
+    onClick: () -> Unit
+) {
+    val targetAlpha = when (state) {
+        SyncedLineState.ACTIVE -> 1f
+        SyncedLineState.NEAR_NEXT -> 0.72f
+        SyncedLineState.NEAR_PAST -> 0.6f
+        SyncedLineState.UPCOMING -> 0.42f
+        SyncedLineState.PAST -> 0.32f
+    }
+    val targetSize = when (state) {
+        SyncedLineState.ACTIVE -> fontSizeSp + 5
+        SyncedLineState.NEAR_NEXT, SyncedLineState.NEAR_PAST -> fontSizeSp
+        else -> (fontSizeSp - 3).coerceAtLeast(13)
+    }
+    val alpha by animateFloatAsState(targetAlpha, tween(320), label = "lyric-alpha")
+    val size by animateFloatAsState(targetSize.toFloat(), tween(320), label = "lyric-size")
+    val weight = when {
+        !boldText -> FontWeight.Normal
+        state == SyncedLineState.ACTIVE -> FontWeight.Bold
+        else -> FontWeight.SemiBold
+    }
+    Box(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(10.dp))
+            .clickable(onClickLabel = "Ir a esta parte de la canción", onClick = onClick)
+            .padding(horizontal = 4.dp, vertical = 2.dp)
+    ) {
+        LyricLineWithTranslation(
+            text = text,
+            translation = translation,
+            alpha = alpha,
+            fontSizeSp = size.roundToInt(),
+            fontWeight = weight
+        )
     }
 }
 
