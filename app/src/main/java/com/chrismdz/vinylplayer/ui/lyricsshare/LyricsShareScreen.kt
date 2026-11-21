@@ -8,6 +8,9 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.horizontalScroll
@@ -88,15 +91,21 @@ import kotlinx.coroutines.launch
 private enum class ShareStep { SELECT, CUSTOMIZE }
 
 /**
+ * Pictures a card can use: the song's own cover ([track]) and, when it is a different picture, the
+ * album's cover ([album]). Null [album] means there is nothing else to choose.
+ */
+internal data class ShareCovers(val track: Bitmap?, val album: Bitmap?)
+
+/**
  * "Compartir letra": pick lines, then style the card and save or share it.
- * [cover] is the shared song's own cover (the album cover only when the song has none); its colors come
- * from VinylPlayer's existing cover color system through [LyricsCardPalette].
+ * The card uses the song's own cover by default, or the album's cover when chosen (see [ShareCovers]);
+ * its colors come from the cover in use through VinylPlayer's cover color system ([LyricsCardPalette]).
  */
 @Composable
 internal fun LyricsShareDialog(
     title: String,
     artist: String,
-    cover: Bitmap?,
+    covers: ShareCovers,
     lyrics: Lyrics,
     onDismiss: () -> Unit
 ) {
@@ -109,7 +118,9 @@ internal fun LyricsShareDialog(
     // 1 = automatic size for the number of lines; the user can make the lyrics smaller or bigger.
     var textScale by remember { mutableFloatStateOf(1f) }
     var font by remember { mutableStateOf(LyricsCardFont.STYLE) }
-    // Recomputed for each cover, so another album's palette is never reused by mistake.
+    var useAlbumCover by remember { mutableStateOf(false) }
+    val cover = if (useAlbumCover && covers.album != null) covers.album else covers.track
+    // Recomputed for the cover in use, so the colors always match the picture on the card.
     val schemes by produceState(initialValue = LyricsCardPalette.fallback(), cover) {
         value = LyricsCardPalette.schemesFor(cover)
     }
@@ -205,6 +216,9 @@ internal fun LyricsShareDialog(
                         onTextScale = { textScale = it },
                         font = font,
                         onFont = { font = it },
+                        coverChoice = covers.album?.let { album ->
+                            CoverChoice(track = covers.track, album = album, useAlbum = useAlbumCover) { useAlbumCover = it }
+                        },
                         busy = busy,
                         onBack = { step = ShareStep.SELECT },
                         onStyle = { style = it },
@@ -385,7 +399,12 @@ private fun ColumnScope.SelectStep(
     }
 }
 
-private enum class CustomizePanel(val label: String) { STYLE("ESTILO"), FONT("FUENTE"), SIZE("TAMAÑO"), COLORS("COLORES") }
+private enum class CustomizePanel(val label: String) {
+    STYLE("ESTILO"), FONT("FUENTE"), SIZE("TAMAÑO"), COLORS("COLORES"), COVER("PORTADA")
+}
+
+/** Track/album cover choice, offered only when the album's cover differs from the song's. */
+private class CoverChoice(val track: Bitmap?, val album: Bitmap, val useAlbum: Boolean, val onChange: (Boolean) -> Unit)
 
 @Composable
 private fun ColumnScope.CustomizeStep(
@@ -398,6 +417,7 @@ private fun ColumnScope.CustomizeStep(
     onTextScale: (Float) -> Unit,
     font: LyricsCardFont,
     onFont: (LyricsCardFont) -> Unit,
+    coverChoice: CoverChoice?,
     busy: Boolean,
     onBack: () -> Unit,
     onStyle: (LyricsCardStyle) -> Unit,
@@ -406,6 +426,8 @@ private fun ColumnScope.CustomizeStep(
     onShare: () -> Unit
 ) {
     var panel by remember { mutableStateOf(CustomizePanel.STYLE) }
+    val panels = CustomizePanel.entries.filter { it != CustomizePanel.COVER || coverChoice != null }
+    if (panel !in panels) panel = CustomizePanel.STYLE
     ShareHeader(
         title = "Personalizar",
         subtitle = songLabel,
@@ -426,17 +448,18 @@ private fun ColumnScope.CustomizeStep(
         Modifier
             .align(Alignment.CenterHorizontally)
             .clip(RoundedCornerShape(24.dp))
+            .horizontalScroll(rememberScrollState())
             .background(MaterialTheme.colorScheme.onSurface.copy(alpha = 0.12f))
             .padding(3.dp)
     ) {
-        CustomizePanel.entries.forEach { option ->
+        panels.forEach { option ->
             val active = option == panel
             Box(
                 Modifier
                     .clip(RoundedCornerShape(21.dp))
                     .background(if (active) MaterialTheme.colorScheme.onSurface.copy(alpha = 0.18f) else Color.Transparent)
                     .clickable { panel = option }
-                    .padding(horizontal = 14.dp, vertical = 9.dp)
+                    .padding(horizontal = if (panels.size > 4) 10.dp else 14.dp, vertical = 9.dp)
             ) {
                 Text(
                     option.label,
@@ -491,6 +514,10 @@ private fun ColumnScope.CustomizeStep(
                         ColorSwatch(scheme, selected = index == schemeIndex) { onScheme(index) }
                     }
                 }
+                CustomizePanel.COVER -> if (coverChoice != null) PillRow(spacing = VinylSpacing.md) {
+                    CoverOption("Canción", coverChoice.track, selected = !coverChoice.useAlbum) { coverChoice.onChange(false) }
+                    CoverOption("Álbum", coverChoice.album, selected = coverChoice.useAlbum) { coverChoice.onChange(true) }
+                }
             }
         }
     }
@@ -511,6 +538,46 @@ private fun PillRow(spacing: Dp = VinylSpacing.xs, content: @Composable () -> Un
         horizontalArrangement = Arrangement.spacedBy(spacing),
         verticalAlignment = Alignment.CenterVertically
     ) { content() }
+}
+
+/** Cover thumbnail with its label; the selected one gets an accent ring, like [ColorSwatch]. */
+@Composable
+private fun CoverOption(label: String, cover: Bitmap?, selected: Boolean, onClick: () -> Unit) {
+    Row(
+        Modifier
+            .clip(VinylShapes.control)
+            .background(if (selected) MaterialTheme.colorScheme.primary.copy(alpha = 0.16f) else Color.Transparent)
+            .clickable(onClick = onClick)
+            .padding(VinylSpacing.xs),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        val image = remember(cover) { cover?.asImageBitmap() }
+        Box(
+            Modifier
+                .size(52.dp)
+                .clip(RoundedCornerShape(8.dp))
+                .border(
+                    2.dp,
+                    if (selected) MaterialTheme.colorScheme.primary else Color.Transparent,
+                    RoundedCornerShape(8.dp)
+                )
+                .background(MaterialTheme.colorScheme.surfaceContainerHigh),
+            contentAlignment = Alignment.Center
+        ) {
+            if (image != null) {
+                Image(image, null, Modifier.fillMaxSize().padding(2.dp).clip(RoundedCornerShape(6.dp)), contentScale = ContentScale.Crop)
+            } else {
+                Text("♪", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 20.sp)
+            }
+        }
+        Text(
+            label,
+            color = if (selected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface,
+            style = MaterialTheme.typography.labelLarge,
+            fontWeight = if (selected) FontWeight.Bold else FontWeight.Medium,
+            modifier = Modifier.padding(start = VinylSpacing.sm, end = VinylSpacing.xs)
+        )
+    }
 }
 
 /** Small circle showing a color combination; the selected one gets an accent ring. */

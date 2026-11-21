@@ -631,7 +631,7 @@ fun MainScreen(viewModel: PlayerViewModel, onRequestAudioPermission: () -> Unit 
         )
     }
     lyricsShareTarget?.let { (file, lyrics) ->
-        // The album's chosen cover track: only used when the song has no picture of its own.
+        // The album's chosen cover track: the alternative to the song's own picture.
         val albumCoverSource = remember(file.uri, file.album, state.library) {
             val tracks = state.library.filter { it.album == file.album }
             if (tracks.isEmpty()) null else {
@@ -639,15 +639,18 @@ fun MainScreen(viewModel: PlayerViewModel, onRequestAudioPermission: () -> Unit 
                 chooseAlbumCoverTrack(tracks, override) { it.uri.toString() }
             }
         }
-        // The song's own cover in high resolution. Keyed by the song, so another song's picture is never
-        // kept; the song's thumbnail stands in while the full picture is read.
-        val shareCover by produceState(initialValue = file.artwork, file.uri) {
-            value = viewModel.loadShareCover(file, albumCoverSource)
+        // Covers in high resolution. Keyed by the song, so another song's picture is never kept; the
+        // song's thumbnail stands in while the full pictures are read.
+        val shareCovers by produceState(
+            initialValue = com.chrismdz.vinylplayer.ui.lyricsshare.ShareCovers(file.artwork, null),
+            file.uri
+        ) {
+            value = viewModel.loadShareCovers(file, albumCoverSource)
         }
         com.chrismdz.vinylplayer.ui.lyricsshare.LyricsShareDialog(
             title = file.title,
             artist = file.artist,
-            cover = shareCover,
+            covers = shareCovers,
             lyrics = lyrics,
             onDismiss = { lyricsShareTarget = null }
         )

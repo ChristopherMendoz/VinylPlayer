@@ -35,6 +35,7 @@ import com.chrismdz.vinylplayer.data.playlistimport.PlaylistImportReview
 import com.chrismdz.vinylplayer.data.Lyrics
 import com.chrismdz.vinylplayer.data.LyricsStatus
 import com.chrismdz.vinylplayer.data.RoomLyricsRepository
+import com.chrismdz.vinylplayer.ui.lyricsshare.ShareCovers
 import com.chrismdz.vinylplayer.data.VinylDatabase
 import com.chrismdz.vinylplayer.player.MusicPlayer
 import com.chrismdz.vinylplayer.settings.AppSettings
@@ -567,20 +568,28 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
     private val shareCoverCache = android.util.LruCache<String, Bitmap>(SHARE_COVER_CACHE_SIZE)
 
     /**
-     * Cover for a lyrics card: the song's own embedded picture in high resolution; if the song has
-     * none, the album's cover track ([albumCoverSource]) in high resolution; then any thumbnail in
-     * memory. Cached per source file, so two songs of one album never share each other's picture,
-     * and reopening the same song reuses the same bitmap (and so its cached palette).
+     * Covers for a lyrics card. [ShareCovers.track] is the song's own embedded picture in high
+     * resolution (or its thumbnail); [ShareCovers.album] is the album's chosen cover track, offered as
+     * an alternative only when it is a different picture. When the song has no picture, the album's
+     * cover becomes the track choice. Cached per source file, so two songs of one album never share
+     * each other's picture, and reopening a song reuses the same bitmap (and so its cached palette).
      */
-    suspend fun loadShareCover(song: MusicFile, albumCoverSource: MusicFile?): Bitmap? = withContext(Dispatchers.IO) {
+    internal suspend fun loadShareCovers(song: MusicFile, albumCoverSource: MusicFile?): ShareCovers = withContext(Dispatchers.IO) {
         fun highRes(file: MusicFile): Bitmap? {
             val key = file.uri.toString()
             shareCoverCache.get(key)?.let { return it }
             return repository.readHighResArtwork(getApplication(), file.uri, SHARE_COVER_MIN_SIDE)
                 ?.also { shareCoverCache.put(key, it) }
         }
-        val album = albumCoverSource?.takeIf { it.uri != song.uri }
-        highRes(song) ?: song.artwork ?: album?.let { highRes(it) ?: it.artwork }
+        val albumSource = albumCoverSource?.takeIf { it.uri != song.uri }
+        val track = highRes(song) ?: song.artwork
+        val album = albumSource?.let { highRes(it) ?: it.artwork }
+        when {
+            track == null -> ShareCovers(track = album, album = null)
+            album == null || album === track || runCatching { album.sameAs(track) }.getOrDefault(false) ->
+                ShareCovers(track = track, album = null)
+            else -> ShareCovers(track = track, album = album)
+        }
     }
 
     fun loadFullArtwork(file: MusicFile) {
@@ -1957,7 +1966,7 @@ class PlayerViewModel(application: Application) : AndroidViewModel(application) 
 
     companion object {
         private const val SHARE_COVER_MIN_SIDE = 1080
-        private const val SHARE_COVER_CACHE_SIZE = 3
+        private const val SHARE_COVER_CACHE_SIZE = 4
         private val LYRICS_CACHE_DURATION_MS = TimeUnit.DAYS.toMillis(7)
         private const val MAX_CACHED_ARTIST_BITMAPS = 40
         private const val POSITION_POLL_INTERVAL_MS = 500L
